@@ -1,8 +1,11 @@
 import ExcelJS from 'exceljs';
+// @ts-expect-error — jszip ships no bundled types but is present as ExcelJS dependency
+import JSZip from 'jszip';
 import { supabase } from './supabase';
 import type { BOQItem, BOQFile, ExportResult } from '../types';
 
 // ─── Export unpriced items for rate library upload ───────────────────────────
+// Uses ExcelJS to BUILD a new file from scratch — no round-trip corruption risk.
 
 export async function exportUnpricedItemsForLibrary(
   boqFileName: string,
@@ -63,22 +66,40 @@ export async function exportUnpricedItemsForLibrary(
   sheet.views[0].ySplit = 1;
 
   const outBuffer = await workbook.xlsx.writeBuffer();
-  const blob = new Blob([outBuffer], {
+  triggerDownload(
+    outBuffer,
+    `${boqFileName.replace(/\.xlsx?$/i, '')}_unpriced_for_library.xlsx`
+  );
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function triggerDownload(buffer: ArrayBuffer | Buffer, filename: string): void {
+  const blob = new Blob([buffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
-
-  const baseName = boqFileName.replace(/\.xlsx?$/i, '');
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${baseName}_unpriced_for_library.xlsx`;
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
 
-// ─── Shared helpers ───────────────────────────────────────────────────────────
+// Convert 1-based column index to Excel letter(s): 1→A, 26→Z, 27→AA
+function colIndexToLetter(n: number): string {
+  let result = '';
+  while (n > 0) {
+    n--;
+    result = String.fromCharCode(65 + (n % 26)) + result;
+    n = Math.floor(n / 26);
+  }
+  return result;
+}
+
+// ─── Column detection using ExcelJS (read-only — never writes back) ───────────
 
 const UNIT_PRICE_HEADERS = [
   'سعر الوحدة', 'سعر الوحده', 'unit price', 'unit_price', 'unitprice',
@@ -102,18 +123,14 @@ function extractCellText(cellValue: ExcelJS.CellValue): string {
       const rt = (cellValue as { richText: { text: string }[] }).richText;
       return rt.map(r => r.text ?? '').join('').trim();
     }
-    if ('result' in (cellValue as object)) {
-      return extractCellText((cellValue as { result: ExcelJS.CellValue }).result);
-    }
+    if ('result' in (cellValue as object)) return extractCellText((cellValue as { result: ExcelJS.CellValue }).result);
     if ('formula' in (cellValue as object)) {
       const f = cellValue as { formula: string; result?: ExcelJS.CellValue };
-      if (f.result !== undefined) return extractCellText(f.result);
-      return '';
+      return f.result !== undefined ? extractCellText(f.result) : '';
     }
     if ('sharedFormula' in (cellValue as object)) {
       const sf = cellValue as { sharedFormula: string; result?: ExcelJS.CellValue };
-      if (sf.result !== undefined) return extractCellText(sf.result);
-      return '';
+      return sf.result !== undefined ? extractCellText(sf.result) : '';
     }
     if ('error' in (cellValue as object)) return '';
     if ('text' in (cellValue as object)) return ((cellValue as { text: string }).text ?? '').trim();
@@ -121,41 +138,10 @@ function extractCellText(cellValue: ExcelJS.CellValue): string {
   return String(cellValue).trim();
 }
 
-// Returns true if the cell contains a formula (SUM, SUBTOTAL, etc.)
-function hasFormula(cellValue: ExcelJS.CellValue): boolean {
-  if (!cellValue || typeof cellValue !== 'object') return false;
-  const cv = cellValue as Record<string, unknown>;
-  return typeof cv['formula'] === 'string'
-    || typeof cv['sharedFormula'] === 'string';
-}
-
-// ─── Column detection ──────────────────────────────────────────────────────────
-
 interface DetectedColumns {
-  unitPriceCol: number;
-  totalCol: number;
-  headerRow: number;
-  qtyCol: number;
-}
-
-const QTY_HEADERS = ['الكمية', 'كمية', 'quantity', 'qty'];
-
-function scoreRow(texts: Record<number, string>): number {
-  let score = 0;
-  for (const val of Object.values(texts)) {
-    if (headerMatches(val, UNIT_PRICE_HEADERS)) score += 3;
-    if (headerMatches(val, TOTAL_HEADERS)) score += 2;
-  }
-  return score;
-}
-
-function getRowTexts(sheet: ExcelJS.Worksheet, rowNum: number): Record<number, string> {
-  const result: Record<number, string> = {};
-  sheet.getRow(rowNum).eachCell({ includeEmpty: false }, (cell, col) => {
-    const txt = extractCellText(cell.value);
-    if (txt) result[col] = txt;
-  });
-  return result;
+  unitPriceCol: number; // 1-based
+  totalCol: number;     // 1-based, -1 if not found
+  headerRow: number;    // last header row number
 }
 
 function detectColumns(sheet: ExcelJS.Worksheet): DetectedColumns | null {
@@ -163,59 +149,156 @@ function detectColumns(sheet: ExcelJS.Worksheet): DetectedColumns | null {
   let bestRow = -1;
   let bestUnitPriceCol = -1;
   let bestTotalCol = -1;
-  let bestQtyCol = -1;
 
-  // Scan up to 60 rows to handle files with large title sections before the table
+  const getTexts = (rowNum: number): Record<number, string> => {
+    const result: Record<number, string> = {};
+    sheet.getRow(rowNum).eachCell({ includeEmpty: false }, (cell, col) => {
+      const txt = extractCellText(cell.value);
+      if (txt) result[col] = txt;
+    });
+    return result;
+  };
+
+  const scoreTexts = (texts: Record<number, string>): number => {
+    let s = 0;
+    for (const v of Object.values(texts)) {
+      if (headerMatches(v, UNIT_PRICE_HEADERS)) s += 3;
+      if (headerMatches(v, TOTAL_HEADERS)) s += 2;
+    }
+    return s;
+  };
+
   for (let rowNum = 1; rowNum <= Math.min(60, sheet.rowCount); rowNum++) {
-    const texts = getRowTexts(sheet, rowNum);
-    const nextTexts = getRowTexts(sheet, rowNum + 1);
-
-    // Merge current + next row to handle two-row headers
+    const texts = getTexts(rowNum);
+    const next = getTexts(rowNum + 1);
     const merged: Record<number, string> = { ...texts };
-    for (const [colStr, val] of Object.entries(nextTexts)) {
-      const c = Number(colStr);
-      merged[c] = merged[c] ? merged[c] + ' ' + val : val;
+    for (const [c, v] of Object.entries(next)) {
+      const col = Number(c);
+      merged[col] = merged[col] ? merged[col] + ' ' + v : v;
     }
 
-    const score = scoreRow(merged);
+    const score = scoreTexts(merged);
     if (score < 3) continue;
 
-    let unitPriceCol = -1;
-    let totalCol = -1;
-    let qtyCol = -1;
-
-    for (const [colStr, val] of Object.entries(merged)) {
-      const colNum = Number(colStr);
-      if (unitPriceCol === -1 && headerMatches(val, UNIT_PRICE_HEADERS)) unitPriceCol = colNum;
-      if (totalCol === -1 && headerMatches(val, TOTAL_HEADERS)) totalCol = colNum;
-      if (qtyCol === -1 && headerMatches(val, QTY_HEADERS)) qtyCol = colNum;
+    let upCol = -1;
+    let totCol = -1;
+    for (const [c, v] of Object.entries(merged)) {
+      const col = Number(c);
+      if (upCol === -1 && headerMatches(v, UNIT_PRICE_HEADERS)) upCol = col;
+      if (totCol === -1 && headerMatches(v, TOTAL_HEADERS)) totCol = col;
     }
 
-    if (unitPriceCol !== -1 && score > bestScore) {
+    if (upCol !== -1 && score > bestScore) {
       bestScore = score;
       bestRow = rowNum;
-      bestUnitPriceCol = unitPriceCol;
-      bestTotalCol = totalCol;
-      bestQtyCol = qtyCol;
+      bestUnitPriceCol = upCol;
+      bestTotalCol = totCol;
     }
   }
 
   if (bestRow === -1 || bestUnitPriceCol === -1) return null;
 
-  // Check if row below best is also a header row (two-row header pattern)
-  const nextTexts = getRowTexts(sheet, bestRow + 1);
-  const nextScore = scoreRow(nextTexts);
-  const effectiveHeaderRow = nextScore >= 3 ? bestRow + 1 : bestRow;
+  // Handle two-row headers
+  const nextScore = scoreTexts(
+    (() => {
+      const r: Record<number, string> = {};
+      sheet.getRow(bestRow + 1).eachCell({ includeEmpty: false }, (cell, col) => {
+        const txt = extractCellText(cell.value);
+        if (txt) r[col] = txt;
+      });
+      return r;
+    })()
+  );
 
   return {
     unitPriceCol: bestUnitPriceCol,
     totalCol: bestTotalCol,
-    headerRow: effectiveHeaderRow,
-    qtyCol: bestQtyCol,
+    headerRow: nextScore >= 3 ? bestRow + 1 : bestRow,
   };
 }
 
-// ─── Main export function ─────────────────────────────────────────────────────
+// ─── XML surgery helpers ──────────────────────────────────────────────────────
+
+// Update or insert <v>value</v> in a cell element string.
+// cellXml is the full <c ...>...</c> element.
+function setCellValue(cellXml: string, value: number): string {
+  // Remove t="s" (string type) and t="str" if present — numeric cells have no t attr
+  cellXml = cellXml.replace(/\s+t="[^"]*"/, '');
+
+  if (/<v>/.test(cellXml)) {
+    // Replace existing <v>...</v>
+    return cellXml.replace(/<v>[^<]*<\/v>/, `<v>${value}</v>`);
+  }
+
+  // Cell has no <v> — insert before </c>
+  // Handle self-closing <c ... />
+  if (/\/>$/.test(cellXml.trimEnd())) {
+    return cellXml.trimEnd().replace(/\/>$/, `><v>${value}</v></c>`);
+  }
+
+  return cellXml.replace(/<\/c>/, `<v>${value}</v></c>`);
+}
+
+// Clear <v>...</v> from a cell, leaving the cell element intact (for formula cells
+// we don't touch; for non-formula cells we remove the stale value).
+function clearCellValue(cellXml: string): string {
+  return cellXml.replace(/<v>[^<]*<\/v>/, '');
+}
+
+// Apply value mutations to xl/worksheets/sheet1.xml string.
+// mutations: Map<rowIndex, Map<colLetter, number | null>>
+//   number → set that value
+//   null   → clear that value (leave cell structure, remove <v>)
+function applyMutationsToSheetXml(
+  xml: string,
+  mutations: Map<number, Map<string, number | null>>
+): string {
+  // Process row by row using regex that captures each <row ...>...</row> block
+  return xml.replace(
+    /(<row\b[^>]*\br="(\d+)"[^>]*>)([\s\S]*?)(<\/row>)/g,
+    (fullMatch, openTag: string, rowNumStr: string, rowBody: string, closeTag: string) => {
+      const rowNum = parseInt(rowNumStr, 10);
+      const colMutations = mutations.get(rowNum);
+      if (!colMutations) return fullMatch; // untouched row
+
+      let newBody = rowBody;
+
+      for (const [colLetter, value] of colMutations) {
+        const cellRef = `${colLetter}${rowNum}`;
+        // Match the full <c r="XN" ...>...</c> or <c r="XN" ... />
+        const cellPattern = new RegExp(
+          `<c\\b([^>]*\\br="${escapeRegex(cellRef)}"[^>]*)>([\\s\\S]*?)<\\/c>|<c\\b([^>]*\\br="${escapeRegex(cellRef)}"[^>]*)\\/>`,
+          'g'
+        );
+
+        const existingCell = cellPattern.exec(newBody);
+
+        if (existingCell) {
+          const original = existingCell[0];
+          let updated: string;
+          if (value === null) {
+            updated = clearCellValue(original);
+          } else {
+            updated = setCellValue(original, value);
+          }
+          newBody = newBody.slice(0, existingCell.index) + updated + newBody.slice(existingCell.index + original.length);
+        } else if (value !== null) {
+          // Cell doesn't exist in this row yet — append before </row>
+          // We'll handle this by inserting after the last existing cell or at start
+          newBody = newBody + `<c r="${cellRef}"><v>${value}</v></c>`;
+        }
+      }
+
+      return openTag + newBody + closeTag;
+    }
+  );
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// ─── Main export function — JSZip surgical XML edit, no ExcelJS write path ───
 
 export async function exportBOQ(boqFile: BOQFile, items: BOQItem[]): Promise<ExportResult> {
   const pricedItems = items.filter(
@@ -238,7 +321,7 @@ export async function exportBOQ(boqFile: BOQFile, items: BOQItem[]): Promise<Exp
     };
   }
 
-  // Step 1: Load original file from storage
+  // Step 1: Download original file from storage
   let buffer: ArrayBuffer;
   try {
     const { data, error } = await supabase.storage
@@ -257,7 +340,8 @@ export async function exportBOQ(boqFile: BOQFile, items: BOQItem[]): Promise<Exp
     };
   }
 
-  // Step 2: Parse workbook
+  // Step 2: Use ExcelJS read-only to detect which column is "unit price"
+  // We never call writeBuffer() on this workbook — it's purely for column detection.
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
 
@@ -273,9 +357,8 @@ export async function exportBOQ(boqFile: BOQFile, items: BOQItem[]): Promise<Exp
   }
 
   const sheet = workbook.worksheets[0];
-
-  // Step 3: Detect price/total columns using best-score matching
   const cols = detectColumns(sheet);
+
   if (!cols || cols.unitPriceCol === -1) {
     return {
       success: false,
@@ -287,134 +370,87 @@ export async function exportBOQ(boqFile: BOQFile, items: BOQItem[]): Promise<Exp
     };
   }
 
-  // Build row → item map for O(1) lookup
-  const pricedRowMap = new Map<number, BOQItem>();
-  for (const item of pricedItems) {
-    pricedRowMap.set(item.row_index, item);
-  }
+  const upColLetter = colIndexToLetter(cols.unitPriceCol);
+  const totColLetter = cols.totalCol !== -1 ? colIndexToLetter(cols.totalCol) : null;
 
-  // Build set of ALL known BOQ row indexes (priced or unpriced, excluding descriptive-only)
-  // Only these rows may have their price cells cleared — structural rows are never touched
+  // Step 3: Build mutation map — row → col → value
+  // Only touch rows we know about from the DB.
   const allBoqRowIndexes = new Set<number>(
-    items
-      .filter(i => i.row_index != null && i.row_index > 0)
-      .map(i => i.row_index)
+    items.filter(i => i.row_index != null && i.row_index > 0).map(i => i.row_index)
   );
 
-  // Compute grand total from DB
-  const dbGrandTotal = pricedItems.reduce(
-    (sum, i) => sum + (i.total_price ?? (i.quantity ?? 0) * (i.unit_rate ?? 0)),
-    0
-  );
-  const dbGrandTotalRounded = Math.round(dbGrandTotal * 100) / 100;
+  const pricedRowMap = new Map<number, BOQItem>();
+  for (const item of pricedItems) pricedRowMap.set(item.row_index, item);
 
-  // Step 4: Find grand total row — last hard-coded numeric cell in totalCol whose
-  // value is plausibly a grand total (>= 10% of DB total). Formula grand totals
-  // will recalculate automatically and don't need to be overwritten.
-  let grandTotalRowNum = -1;
-  if (cols.totalCol !== -1 && dbGrandTotal > 0) {
-    sheet.eachRow((row, rowNum) => {
-      if (rowNum <= cols.headerRow) return;
-      const totCell = row.getCell(cols.totalCol);
-      if (!totCell.value || hasFormula(totCell.value)) return;
-      const numVal = typeof totCell.value === 'number'
-        ? totCell.value
-        : typeof totCell.value === 'object' && 'result' in (totCell.value as object)
-          ? (totCell.value as { result: ExcelJS.CellValue }).result as number
-          : null;
-      if (typeof numVal === 'number' && numVal > 0 && numVal >= dbGrandTotal * 0.1) {
-        grandTotalRowNum = rowNum;
-      }
-    });
-  }
+  const mutations = new Map<number, Map<string, number | null>>();
 
-  // Step 5: Inject prices — conservative approach:
-  //   - Formula cells: always leave untouched (Excel recalculates on open)
-  //   - Known BOQ rows with DB price: inject unit_rate + total_price
-  //   - Known BOQ rows without DB price: clear price cells (previously unpriced)
-  //   - ALL other rows (structural, subtotals, section headers): leave completely untouched
-  //   - Grand total row with hard-coded number: overwrite with DB grand total
-  let injected = 0;
-  const unmatched: string[] = [];
+  for (const rowIdx of allBoqRowIndexes) {
+    const dbItem = pricedRowMap.get(rowIdx);
+    const colMap = new Map<string, number | null>();
 
-  sheet.eachRow((row, rowNum) => {
-    if (rowNum <= cols.headerRow) return;
-
-    const dbItem = pricedRowMap.get(rowNum);
-    const isKnownBoqRow = allBoqRowIndexes.has(rowNum);
-    const isGrandTotalRow = rowNum === grandTotalRowNum;
-
-    // Only touch rows we actually need to modify — never commit untouched rows
-    let rowModified = false;
-
-    // Grand total row: overwrite with DB grand total
-    if (isGrandTotalRow && cols.totalCol !== -1) {
-      const totCell = row.getCell(cols.totalCol);
-      if (!hasFormula(totCell.value)) {
-        totCell.value = dbGrandTotalRounded;
-        rowModified = true;
+    if (dbItem) {
+      // Inject unit rate
+      colMap.set(upColLetter, dbItem.unit_rate!);
+      // Inject total if we have a total column
+      if (totColLetter) {
+        const total = dbItem.total_price
+          ?? Math.round((dbItem.quantity ?? 0) * (dbItem.unit_rate ?? 0) * 100) / 100;
+        colMap.set(totColLetter, total);
       }
     } else {
-      // ── Unit price column ──────────────────────────────────────────────────
-      const upCell = row.getCell(cols.unitPriceCol);
-      if (!hasFormula(upCell.value)) {
-        if (dbItem) {
-          upCell.value = dbItem.unit_rate;
-          rowModified = true;
-        } else if (isKnownBoqRow && upCell.value != null) {
-          upCell.value = null;
-          rowModified = true;
-        }
-      }
-
-      // ── Total column ───────────────────────────────────────────────────────
-      if (cols.totalCol !== -1) {
-        const totCell = row.getCell(cols.totalCol);
-        if (!hasFormula(totCell.value)) {
-          if (dbItem) {
-            const total = dbItem.total_price
-              ?? Math.round((dbItem.quantity ?? 0) * (dbItem.unit_rate ?? 0) * 100) / 100;
-            totCell.value = total;
-            rowModified = true;
-          } else if (isKnownBoqRow && totCell.value != null) {
-            totCell.value = null;
-            rowModified = true;
-          }
-        }
-      }
+      // Unpriced BOQ row — clear any stale values
+      colMap.set(upColLetter, null);
+      if (totColLetter) colMap.set(totColLetter, null);
     }
 
-    if (rowModified) row.commit();
-    if (dbItem) injected++;
-  });
-
-  // Collect items whose row_index fell at or before the header (shouldn't happen normally)
-  for (const item of pricedItems) {
-    if (item.row_index <= cols.headerRow) {
-      unmatched.push(item.item_no || item.description.slice(0, 30));
-    }
+    mutations.set(rowIdx, colMap);
   }
 
-  // Step 6: Download
-  const outBuffer = await workbook.xlsx.writeBuffer();
-  const blob = new Blob([outBuffer], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  });
+  // Step 4: Open original xlsx as ZIP and surgically edit sheet1.xml only.
+  // All other files (workbook.xml, styles.xml, shared strings, rels, etc.) pass through byte-for-byte.
+  const zip = await JSZip.loadAsync(buffer);
 
-  const baseName = boqFile.name.replace(/\.xlsx?$/i, '');
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${baseName}_priced.xlsx`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  // Find the first sheet file (usually xl/worksheets/sheet1.xml)
+  const sheetKeys = Object.keys(zip.files).filter(
+    k => k.match(/^xl\/worksheets\/sheet\d+\.xml$/)
+  ).sort();
+
+  if (sheetKeys.length === 0) {
+    return {
+      success: false,
+      injected: 0,
+      total: items.length,
+      variance: 0,
+      unmatched: [],
+      error: 'Could not locate sheet XML inside the xlsx file.',
+    };
+  }
+
+  const sheetKey = sheetKeys[0];
+  let sheetXml = await zip.file(sheetKey)!.async('string');
+
+  // Apply all mutations
+  sheetXml = applyMutationsToSheetXml(sheetXml, mutations);
+
+  zip.file(sheetKey, sheetXml);
+
+  // Remove calcChain.xml — it references stale calculation order and Excel regenerates it.
+  zip.remove('xl/calcChain.xml');
+
+  // Step 5: Generate output ZIP — all untouched files preserved byte-for-byte
+  const outBuffer = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
+
+  triggerDownload(outBuffer, `${boqFile.name.replace(/\.xlsx?$/i, '')}_priced.xlsx`);
 
   await supabase
     .from('boq_files')
     .update({ export_variance_pct: 0 })
     .eq('id', boqFile.id);
+
+  const injected = pricedItems.filter(i => i.row_index > cols.headerRow).length;
+  const unmatched = pricedItems
+    .filter(i => i.row_index <= cols.headerRow)
+    .map(i => i.item_no || i.description.slice(0, 30));
 
   return {
     success: true,
