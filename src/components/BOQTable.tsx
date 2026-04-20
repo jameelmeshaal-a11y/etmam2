@@ -14,6 +14,7 @@ import StatusBadge from './StatusBadge';
 import PriceBreakdownModal from './PriceBreakdownModal';
 import MatchDetailsModal from './MatchDetailsModal';
 import type { PricingProgress } from '../lib/pricingEngine';
+import BMSCalculatorModal, { isBMSItem } from './BMSCalculatorModal';
 
 interface BOQTableProps {
   boqFileId: string;
@@ -71,6 +72,7 @@ export default function BOQTable({ boqFileId, boqFile, onBack }: BOQTableProps) 
   const [approvingItemId, setApprovingItemId] = useState<string | null>(null);
   const [editItem, setEditItem] = useState<BOQItem | null>(null);
   const [matchItemState, setMatchItemState] = useState<BOQItem | null>(null);
+  const [bmsItem, setBmsItem] = useState<BOQItem | null>(null);
   const itemsRef = useRef<BOQItem[]>([]);
 
   // Silent refresh — no loading spinner, no white flash
@@ -548,6 +550,7 @@ export default function BOQTable({ boqFileId, boqFile, onBack }: BOQTableProps) 
                 const isPending = item.status === 'pending' && item.unit_rate != null && item.unit_rate > 0;
                 const divisionCode = item.item_no ? item.item_no.split('-')[0] : '';
                 const isUnpricedRow = !isDescriptive && (item.unit_rate == null || item.unit_rate === 0) && (item.quantity ?? 0) > 0;
+                const isBMS = !isDescriptive && isBMSItem(item.description);
 
                 return (
                   <tr
@@ -555,6 +558,8 @@ export default function BOQTable({ boqFileId, boqFile, onBack }: BOQTableProps) 
                     className={`transition-colors ${
                       isDescriptive
                         ? 'bg-slate-100 font-medium'
+                        : isBMS
+                        ? 'bg-slate-800/5 hover:bg-slate-800/10 border-r-2 border-slate-600'
                         : isUnpricedRow
                         ? 'bg-red-50/60 hover:bg-red-50'
                         : idx % 2 === 0 ? 'bg-white hover:bg-blue-50/30' : 'bg-slate-50/40 hover:bg-blue-50/30'
@@ -563,9 +568,16 @@ export default function BOQTable({ boqFileId, boqFile, onBack }: BOQTableProps) 
                     <td className="px-2 py-2.5 text-xs text-slate-500 text-center font-mono">{divisionCode || '—'}</td>
                     <td className="px-2 py-2.5 text-xs text-slate-700 text-center font-mono ltr">{item.item_no || '—'}</td>
                     <td className="px-3 py-2.5">
-                      <p className={`text-sm leading-snug ${isDescriptive ? 'font-semibold text-slate-800' : 'text-slate-700'}`}>
-                        {item.description}
-                      </p>
+                      <div className="flex items-start gap-2">
+                        <p className={`text-sm leading-snug flex-1 ${isDescriptive ? 'font-semibold text-slate-800' : 'text-slate-700'}`}>
+                          {item.description}
+                        </p>
+                        {isBMS && (
+                          <span className="flex-shrink-0 text-xs font-bold px-1.5 py-0.5 rounded bg-slate-800 text-white mt-0.5">
+                            BMS
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-2 py-2.5 text-center">
                       {!isDescriptive && item.category ? (
@@ -624,7 +636,15 @@ export default function BOQTable({ boqFileId, boqFile, onBack }: BOQTableProps) 
                             <Check size={14} className={isApprovingThis ? 'animate-pulse' : ''} />
                           </button>
                         )}
-                        {!isDescriptive && item.linked_rate_id && (
+                        {!isDescriptive && (isBMSItem(item.description) ? (
+                          <button
+                            onClick={() => setBmsItem(item)}
+                            title="حاسبة BMS"
+                            className="w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
+                          >
+                            <Eye size={14} />
+                          </button>
+                        ) : item.linked_rate_id ? (
                           <button
                             onClick={() => setMatchItemState(item)}
                             title="عرض التطابق"
@@ -632,7 +652,7 @@ export default function BOQTable({ boqFileId, boqFile, onBack }: BOQTableProps) 
                           >
                             <Eye size={14} />
                           </button>
-                        )}
+                        ) : null)}
                         {!isDescriptive && (
                           <button
                             onClick={() => setEditItem(item)}
@@ -672,6 +692,18 @@ export default function BOQTable({ boqFileId, boqFile, onBack }: BOQTableProps) 
           item={matchItemState}
           libraryItem={getLibraryItemForMatch(matchItemState)}
           onClose={() => setMatchItemState(null)}
+        />
+      )}
+
+      {bmsItem && (
+        <BMSCalculatorModal
+          item={bmsItem}
+          boqFileId={boqFileId}
+          onClose={() => setBmsItem(null)}
+          onSaved={async () => {
+            setBmsItem(null);
+            await refreshItems();
+          }}
         />
       )}
     </div>
