@@ -265,9 +265,13 @@ function applyMutationsToSheetXml(
 
       for (const [colLetter, value] of colMutations) {
         const cellRef = `${colLetter}${rowNum}`;
-        // Match the full <c r="XN" ...>...</c> or <c r="XN" ... />
+        const esc = escapeRegex(cellRef);
+        // Self-closing first, then non-self-closing with negative lookahead to avoid greedy overrun.
+        // [^>]* in the opening tag cannot cross the > boundary, so r="XN" is guaranteed to be
+        // in the <c ...> opening tag only — never in formula/value child text.
         const cellPattern = new RegExp(
-          `<c\\b([^>]*\\br="${escapeRegex(cellRef)}"[^>]*)>([\\s\\S]*?)<\\/c>|<c\\b([^>]*\\br="${escapeRegex(cellRef)}"[^>]*)\\/>`,
+          `<c\\b[^>]*\\br="${esc}"[^>]*\\/>`
+          + `|<c\\b[^>]*\\br="${esc}"[^>]*>(?:(?!<\\/c>)[\\s\\S])*<\\/c>`,
           'g'
         );
 
