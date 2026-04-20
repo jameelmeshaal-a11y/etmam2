@@ -220,19 +220,21 @@ export default function BMSCalculatorModal({ item, boqFileId, onClose, onSaved }
         p_linked_rate_id: null,
       });
 
-      if (rpcErr) {
-        // Fallback direct update
-        await supabase
-          .from('boq_items')
-          .update({
-            unit_rate: unitRate,
-            total_price: totalCost,
-            status: 'manual',
-            override_type: 'manual',
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', item.id);
-      }
+      // Always do direct update to ensure BMS price is saved correctly
+      const { error: updateErr } = await supabase
+        .from('boq_items')
+        .update({
+          unit_rate: unitRate,
+          total_price: totalCost,
+          status: 'manual',
+          override_type: 'manual',
+          linked_rate_id: null,
+          confidence: 100,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', item.id);
+
+      if (rpcErr && updateErr) throw updateErr;
 
       onSaved();
       onClose();
