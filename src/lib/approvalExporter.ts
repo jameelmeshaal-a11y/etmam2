@@ -344,47 +344,47 @@ export async function exportBOQ(boqFile: BOQFile, items: BOQItem[]): Promise<Exp
     const isKnownBoqRow = allBoqRowIndexes.has(rowNum);
     const isGrandTotalRow = rowNum === grandTotalRowNum;
 
-    // Grand total row: overwrite with DB grand total, skip normal processing
+    // Only touch rows we actually need to modify — never commit untouched rows
+    let rowModified = false;
+
+    // Grand total row: overwrite with DB grand total
     if (isGrandTotalRow && cols.totalCol !== -1) {
       const totCell = row.getCell(cols.totalCol);
       if (!hasFormula(totCell.value)) {
         totCell.value = dbGrandTotalRounded;
-        row.commit();
+        rowModified = true;
       }
-      return;
-    }
-
-    // ── Unit price column ──────────────────────────────────────────────────
-    const upCell = row.getCell(cols.unitPriceCol);
-    if (hasFormula(upCell.value)) {
-      // keep formula intact
-    } else if (dbItem) {
-      upCell.value = dbItem.unit_rate;
-    } else if (isKnownBoqRow) {
-      // Known BOQ row that is currently unpriced — clear stale value if any
-      upCell.value = null;
-    }
-    // else: structural row — leave completely untouched
-
-    // ── Total column ───────────────────────────────────────────────────────
-    if (cols.totalCol !== -1) {
-      const totCell = row.getCell(cols.totalCol);
-
-      if (hasFormula(totCell.value)) {
-        // leave formula intact — Excel will recalculate SUM rows on open
-      } else if (dbItem) {
-        const total = dbItem.total_price
-          ?? Math.round((dbItem.quantity ?? 0) * (dbItem.unit_rate ?? 0) * 100) / 100;
-        totCell.value = total;
-      } else if (isKnownBoqRow) {
-        // Unpriced BOQ row — clear stale total
-        totCell.value = null;
+    } else {
+      // ── Unit price column ──────────────────────────────────────────────────
+      const upCell = row.getCell(cols.unitPriceCol);
+      if (!hasFormula(upCell.value)) {
+        if (dbItem) {
+          upCell.value = dbItem.unit_rate;
+          rowModified = true;
+        } else if (isKnownBoqRow && upCell.value != null) {
+          upCell.value = null;
+          rowModified = true;
+        }
       }
-      // else: structural row — leave completely untouched
+
+      // ── Total column ───────────────────────────────────────────────────────
+      if (cols.totalCol !== -1) {
+        const totCell = row.getCell(cols.totalCol);
+        if (!hasFormula(totCell.value)) {
+          if (dbItem) {
+            const total = dbItem.total_price
+              ?? Math.round((dbItem.quantity ?? 0) * (dbItem.unit_rate ?? 0) * 100) / 100;
+            totCell.value = total;
+            rowModified = true;
+          } else if (isKnownBoqRow && totCell.value != null) {
+            totCell.value = null;
+            rowModified = true;
+          }
+        }
+      }
     }
 
-    row.commit();
-
+    if (rowModified) row.commit();
     if (dbItem) injected++;
   });
 
