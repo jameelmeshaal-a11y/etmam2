@@ -42,7 +42,7 @@ export default function PriceBreakdownModal({ item, onClose, onSaved }: PriceBre
 
     try {
       const { error: rpcError } = await supabase.rpc('save_manual_price', {
-        p_item_id: item.id,
+        p_boq_item_id: item.id,
         p_unit_rate: derivedUnitRate,
         p_materials: 0,
         p_labor: 0,
@@ -50,6 +50,7 @@ export default function PriceBreakdownModal({ item, onClose, onSaved }: PriceBre
         p_logistics: 0,
         p_risk: 0,
         p_profit: 0,
+        p_linked_rate_id: null,
       });
 
       if (rpcError) {

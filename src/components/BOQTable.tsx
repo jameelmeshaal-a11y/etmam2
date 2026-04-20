@@ -614,6 +614,8 @@ export default function BOQTable({ boqFileId, boqFile, onBack }: BOQTableProps) 
                       <div className="flex items-center gap-1 justify-center">
                         {isManual ? (
                           <span title="مقفل يدوياً"><Lock size={14} className="text-blue-400" /></span>
+                        ) : isBMS ? (
+                          null
                         ) : (
                           !isDescriptive && (
                             <button

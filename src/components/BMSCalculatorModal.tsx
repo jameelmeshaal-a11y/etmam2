@@ -109,19 +109,26 @@ const GROUP_ICONS: Record<string, React.ReactNode> = {
 type Counts = Record<string, number>;
 
 function isBMSItem(description: string): boolean {
-  const d = description.toLowerCase();
-  return (
-    d.includes('bms') ||
-    d.includes('bas') ||
-    d.includes('نظام إدارة المباني') ||
-    d.includes('نظام ادارة المباني') ||
-    d.includes('نظام ادارة') ||
-    d.includes('نظام مراقبة') ||
-    d.includes('building management') ||
-    d.includes('building automation') ||
-    d.includes('ddc') ||
-    d.includes('scada')
-  );
+  const d = description.trim();
+  const dl = d.toLowerCase();
+
+  // Exclude "لزوم نظام BMS" suffix patterns (item FOR bms, not IS bms)
+  if (/لزوم\s+نظام\s+bms\s*$/i.test(dl)) return false;
+  if (/لزوم\s+.*bms\s*$/i.test(dl)) return false;
+
+  // Must be primary subject: BMS/نظام إدارة المباني as the main item
+  if (/^[^،,\n]*\(\s*BMS\s*\)/i.test(d)) return true;   // "نظام إدارة المباني ( BMS )"
+  if (/^[^،,\n]*\(\s*BAS\s*\)/i.test(d)) return true;
+  if (/^\s*(نظام\s+إدارة\s+المباني|نظام\s+ادارة\s+المباني)/i.test(d)) return true;
+  if (/^\s*bms\b/i.test(dl)) return true;
+  if (/^\s*bas\b/i.test(dl)) return true;
+  if (/^\s*(building\s+management|building\s+automation)/i.test(dl)) return true;
+  if (/^\s*(نظام\s+)?(ddc|scada)\b/i.test(dl)) return true;
+
+  // Multi-line: long description with BMS in inner section header
+  if (d.length > 200 && /\n[^\n]*\(\s*BMS\s*\)/i.test(d)) return true;
+
+  return false;
 }
 
 export { isBMSItem };
@@ -202,7 +209,7 @@ export default function BMSCalculatorModal({ item, boqFileId, onClose, onSaved }
         : totalCost;
 
       const { error: rpcErr } = await supabase.rpc('save_manual_price', {
-        p_item_id: item.id,
+        p_boq_item_id: item.id,
         p_unit_rate: unitRate,
         p_materials: 0,
         p_labor: 0,
@@ -210,6 +217,7 @@ export default function BMSCalculatorModal({ item, boqFileId, onClose, onSaved }
         p_logistics: 0,
         p_risk: 0,
         p_profit: 0,
+        p_linked_rate_id: null,
       });
 
       if (rpcErr) {
