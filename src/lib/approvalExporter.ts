@@ -378,11 +378,22 @@ export async function findUnitPriceColumn(
   await workbook.xlsx.load(templateBuffer);
   const sheet = workbook.worksheets[0];
 
-  for (let col = 1; col <= sheet.columnCount; col++) {
-    const header = sheet.getRow(1).getCell(col).value;
-    if (typeof header === "string" && header.includes("سعر الوحدة")) {
-      return sheet.getColumn(col).letter;
-    }
+  const UP_HEADERS = ['سعر الوحدة', 'سعر الوحده', 'unit price', 'unit_price', 'unitprice'];
+
+  for (let rowNum = 1; rowNum <= Math.min(60, sheet.rowCount); rowNum++) {
+    const row = sheet.getRow(rowNum);
+    let found: string | null = null;
+    row.eachCell({ includeEmpty: false }, (cell, col) => {
+      if (found) return;
+      let v = cell.value;
+      if (v && typeof v === 'object' && 'richText' in (v as object))
+        v = (v as { richText: { text: string }[] }).richText.map(r => r.text).join('');
+      if (typeof v !== 'string') return;
+      const lower = v.trim().toLowerCase();
+      if (UP_HEADERS.some(h => lower.includes(h.toLowerCase())))
+        found = sheet.getColumn(col).letter;
+    });
+    if (found) return found;
   }
   return null;
 }
