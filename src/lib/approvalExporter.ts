@@ -302,165 +302,130 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// ─── Main export function — JSZip surgical XML edit, no ExcelJS write path ───
+/**
+ * Injects unit prices into an existing XLSX template using surgical XML editing.
+ * Bypasses ExcelJS write path entirely to avoid workbook.xml corruption.
+ *
+ * @param templateBuffer - The original XLSX file as ArrayBuffer
+ * @param prices - Map of { rowIndex (1-based): unitPrice }
+ * @param unitPriceCol - Column letter for unit price (e.g. "G")
+ * @returns ArrayBuffer of the patched XLSX
+ */
+export async function injectPricesIntoXlsx(
+  templateBuffer: ArrayBuffer,
+  prices: Record<number, number>,
+  unitPriceCol: string
+): Promise<ArrayBuffer> {
+  const zip = await JSZip.loadAsync(templateBuffer);
+
+  // 1. Read sheet1.xml
+  const sheetXml = await zip.file("xl/worksheets/sheet1.xml")!.async("string");
+
+  // 2. Patch each target cell
+  let patchedXml = sheetXml;
+  for (const [rowNum, price] of Object.entries(prices)) {
+    const cellRef = `${unitPriceCol}${rowNum}`;
+
+    // Match the exact cell element, capturing its full opening tag
+    // Handles both empty cells and cells with existing values
+    const cellPattern = new RegExp(
+      `(<c\\s[^>]*\\br="${cellRef}"[^>]*>)(<[^/].*?</c>|</c>)`,
+      "s"
+    );
+
+    if (cellPattern.test(patchedXml)) {
+      // Cell exists — replace its content
+      patchedXml = patchedXml.replace(cellPattern, (_, openTag) => {
+        // Strip t="s" (shared string type) if present, set to numeric
+        const cleanTag = openTag.replace(/\s*t="s"/, "");
+        return `${cleanTag}<v>${price}</v></c>`;
+      });
+    } else {
+      // Cell doesn't exist — inject it into the correct <row>
+      const rowPattern = new RegExp(
+        `(<row[^>]*\\br="${rowNum}"[^>]*>)(.*?)(</row>)`,
+        "s"
+      );
+      patchedXml = patchedXml.replace(rowPattern, (_, rowOpen, rowContent, rowClose) => {
+        const newCell = `<c r="${cellRef}"><v>${price}</v></c>`;
+        return `${rowOpen}${rowContent}${newCell}${rowClose}`;
+      });
+    }
+  }
+
+  // 3. Write patched sheet back — everything else untouched
+  zip.file("xl/worksheets/sheet1.xml", patchedXml);
+
+  // 4. Remove calcChain — Excel rebuilds it automatically, avoids stale ref errors
+  zip.remove("xl/calcChain.xml");
+
+  // 5. Return as ArrayBuffer
+  const result = await zip.generateAsync({
+    type: "arraybuffer",
+    compression: "DEFLATE",
+  });
+
+  return result;
+}
+
+/**
+ * Helper: use ExcelJS READ-ONLY to find which column letter is "سعر الوحدة"
+ */
+export async function findUnitPriceColumn(
+  templateBuffer: ArrayBuffer
+): Promise<string | null> {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(templateBuffer);
+  const sheet = workbook.worksheets[0];
+
+  for (let col = 1; col <= sheet.columnCount; col++) {
+    const header = sheet.getRow(1).getCell(col).value;
+    if (typeof header === "string" && header.includes("سعر الوحدة")) {
+      return sheet.getColumn(col).letter;
+    }
+  }
+  return null;
+}
+
+// ─── exportBOQ — public API used by BOQTable ─────────────────────────────────
 
 export async function exportBOQ(boqFile: BOQFile, items: BOQItem[]): Promise<ExportResult> {
   const pricedItems = items.filter(
-    i => i.unit_rate != null
-      && i.unit_rate > 0
+    i => i.unit_rate != null && i.unit_rate > 0
       && i.status !== 'descriptive'
       && (i.quantity ?? 0) > 0
-      && i.row_index != null
-      && i.row_index > 0
+      && i.row_index != null && i.row_index > 0
   );
 
   if (pricedItems.length === 0) {
-    return {
-      success: false,
-      injected: 0,
-      total: items.length,
-      variance: 0,
-      unmatched: [],
-      error: 'لا توجد بنود مسعّرة للتصدير. يرجى تسعير البنود أولاً.',
-    };
+    return { success: false, injected: 0, total: items.length, variance: 0, unmatched: [],
+      error: 'لا توجد بنود مسعّرة للتصدير. يرجى تسعير البنود أولاً.' };
   }
 
-  // Step 1: Download original file from storage
   let buffer: ArrayBuffer;
   try {
-    const { data, error } = await supabase.storage
-      .from('boq-files')
-      .download(boqFile.storage_path);
+    const { data, error } = await supabase.storage.from('boq-files').download(boqFile.storage_path);
     if (error || !data) throw new Error(error?.message ?? 'Failed to download file');
     buffer = await data.arrayBuffer();
   } catch (e) {
-    return {
-      success: false,
-      injected: 0,
-      total: items.length,
-      variance: 0,
-      unmatched: [],
-      error: `Storage error: ${(e as Error).message}`,
-    };
+    return { success: false, injected: 0, total: items.length, variance: 0, unmatched: [],
+      error: `Storage error: ${(e as Error).message}` };
   }
 
-  // Step 2: Use ExcelJS read-only to detect which column is "unit price"
-  // We never call writeBuffer() on this workbook — it's purely for column detection.
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(buffer);
-
-  if (workbook.worksheets.length === 0) {
-    return {
-      success: false,
-      injected: 0,
-      total: items.length,
-      variance: 0,
-      unmatched: [],
-      error: 'No worksheets found',
-    };
+  const unitPriceCol = await findUnitPriceColumn(buffer);
+  if (!unitPriceCol) {
+    return { success: false, injected: 0, total: items.length, variance: 0, unmatched: [],
+      error: 'تعذّر تحديد عمود سعر الوحدة في الملف. تحقق من رؤوس الأعمدة.' };
   }
 
-  const sheet = workbook.worksheets[0];
-  const cols = detectColumns(sheet);
+  const prices: Record<number, number> = {};
+  for (const item of pricedItems) prices[item.row_index] = item.unit_rate!;
 
-  if (!cols || cols.unitPriceCol === -1) {
-    return {
-      success: false,
-      injected: 0,
-      total: items.length,
-      variance: 0,
-      unmatched: [],
-      error: 'تعذّر تحديد عمود سعر الوحدة في الملف. تحقق من رؤوس الأعمدة.',
-    };
-  }
-
-  const upColLetter = colIndexToLetter(cols.unitPriceCol);
-  const totColLetter = cols.totalCol !== -1 ? colIndexToLetter(cols.totalCol) : null;
-
-  // Step 3: Build mutation map — row → col → value
-  // Only touch rows we know about from the DB.
-  const allBoqRowIndexes = new Set<number>(
-    items.filter(i => i.row_index != null && i.row_index > 0).map(i => i.row_index)
-  );
-
-  const pricedRowMap = new Map<number, BOQItem>();
-  for (const item of pricedItems) pricedRowMap.set(item.row_index, item);
-
-  const mutations = new Map<number, Map<string, number | null>>();
-
-  for (const rowIdx of allBoqRowIndexes) {
-    const dbItem = pricedRowMap.get(rowIdx);
-    const colMap = new Map<string, number | null>();
-
-    if (dbItem) {
-      // Inject unit rate
-      colMap.set(upColLetter, dbItem.unit_rate!);
-      // Inject total if we have a total column
-      if (totColLetter) {
-        const total = dbItem.total_price
-          ?? Math.round((dbItem.quantity ?? 0) * (dbItem.unit_rate ?? 0) * 100) / 100;
-        colMap.set(totColLetter, total);
-      }
-    } else {
-      // Unpriced BOQ row — clear any stale values
-      colMap.set(upColLetter, null);
-      if (totColLetter) colMap.set(totColLetter, null);
-    }
-
-    mutations.set(rowIdx, colMap);
-  }
-
-  // Step 4: Open original xlsx as ZIP and surgically edit sheet1.xml only.
-  // All other files (workbook.xml, styles.xml, shared strings, rels, etc.) pass through byte-for-byte.
-  const zip = await JSZip.loadAsync(buffer);
-
-  // Find the first sheet file (usually xl/worksheets/sheet1.xml)
-  const sheetKeys = Object.keys(zip.files).filter(
-    k => k.match(/^xl\/worksheets\/sheet\d+\.xml$/)
-  ).sort();
-
-  if (sheetKeys.length === 0) {
-    return {
-      success: false,
-      injected: 0,
-      total: items.length,
-      variance: 0,
-      unmatched: [],
-      error: 'Could not locate sheet XML inside the xlsx file.',
-    };
-  }
-
-  const sheetKey = sheetKeys[0];
-  let sheetXml = await zip.file(sheetKey)!.async('string');
-
-  // Apply all mutations
-  sheetXml = applyMutationsToSheetXml(sheetXml, mutations);
-
-  zip.file(sheetKey, sheetXml);
-
-  // Remove calcChain.xml — it references stale calculation order and Excel regenerates it.
-  zip.remove('xl/calcChain.xml');
-
-  // Step 5: Generate output ZIP — all untouched files preserved byte-for-byte
-  const outBuffer = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
+  const outBuffer = await injectPricesIntoXlsx(buffer, prices, unitPriceCol);
 
   triggerDownload(outBuffer, `${boqFile.name.replace(/\.xlsx?$/i, '')}_priced.xlsx`);
 
-  await supabase
-    .from('boq_files')
-    .update({ export_variance_pct: 0 })
-    .eq('id', boqFile.id);
+  await supabase.from('boq_files').update({ export_variance_pct: 0 }).eq('id', boqFile.id);
 
-  const injected = pricedItems.filter(i => i.row_index > cols.headerRow).length;
-  const unmatched = pricedItems
-    .filter(i => i.row_index <= cols.headerRow)
-    .map(i => i.item_no || i.description.slice(0, 30));
-
-  return {
-    success: true,
-    injected,
-    total: items.length,
-    variance: 0,
-    unmatched,
-  };
+  return { success: true, injected: pricedItems.length, total: items.length, variance: 0, unmatched: [] };
 }
