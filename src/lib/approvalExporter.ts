@@ -274,10 +274,6 @@ export async function exportBOQ(boqFile: BOQFile, items: BOQItem[]): Promise<Exp
 
   const sheet = workbook.worksheets[0];
 
-  if (workbook.worksheets.length > 1) {
-    workbook.worksheets.slice(1).forEach(ws => workbook.removeWorksheet(ws.id));
-  }
-
   // Step 3: Detect price/total columns using best-score matching
   const cols = detectColumns(sheet);
   if (!cols || cols.unitPriceCol === -1) {
