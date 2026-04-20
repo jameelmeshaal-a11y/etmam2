@@ -302,6 +302,37 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Resolve ExcelJS worksheet index → ZIP path using workbook.xml.rels
+async function resolveSheetZipPath(zip: typeof JSZip, sheetIndex: number): Promise<string> {
+  // workbook.xml lists sheets with r:id references; .rels maps those to file paths
+  try {
+    const relsXml = await zip.file("xl/_rels/workbook.xml.rels")!.async("string");
+    // Build map: rId → target path
+    const relMap: Record<string, string> = {};
+    const relPattern = /<Relationship[^>]+Id="([^"]+)"[^>]+Target="([^"]+)"/g;
+    let m: RegExpExecArray | null;
+    while ((m = relPattern.exec(relsXml)) !== null) {
+      relMap[m[1]] = m[2];
+    }
+
+    const wbXml = await zip.file("xl/workbook.xml")!.async("string");
+    // sheets are listed in order; pick the one at sheetIndex (0-based)
+    const sheetPattern = /<sheet\b[^>]+r:id="([^"]+)"[^>]*\/>/g;
+    let idx = 0;
+    while ((m = sheetPattern.exec(wbXml)) !== null) {
+      if (idx === sheetIndex) {
+        const target = relMap[m[1]];
+        // target may be "worksheets/sheet2.xml" (relative to xl/)
+        return target.startsWith('xl/') ? target : `xl/${target}`;
+      }
+      idx++;
+    }
+  } catch (_) {
+    // fallback: assume sheet1
+  }
+  return "xl/worksheets/sheet1.xml";
+}
+
 /**
  * Injects unit prices into an existing XLSX template using surgical XML editing.
  * Bypasses ExcelJS write path entirely to avoid workbook.xml corruption.
@@ -309,39 +340,36 @@ function escapeRegex(s: string): string {
  * @param templateBuffer - The original XLSX file as ArrayBuffer
  * @param prices - Map of { rowIndex (1-based): unitPrice }
  * @param unitPriceCol - Column letter for unit price (e.g. "G")
+ * @param sheetZipPath - ZIP-internal path to the target sheet XML (e.g. "xl/worksheets/sheet2.xml")
  * @returns ArrayBuffer of the patched XLSX
  */
 export async function injectPricesIntoXlsx(
   templateBuffer: ArrayBuffer,
   prices: Record<number, number>,
-  unitPriceCol: string
+  unitPriceCol: string,
+  sheetZipPath = "xl/worksheets/sheet1.xml"
 ): Promise<ArrayBuffer> {
   const zip = await JSZip.loadAsync(templateBuffer);
 
-  // 1. Read sheet1.xml
-  const sheetXml = await zip.file("xl/worksheets/sheet1.xml")!.async("string");
+  const sheetFile = zip.file(sheetZipPath);
+  if (!sheetFile) throw new Error(`Sheet not found in ZIP: ${sheetZipPath}`);
+  const sheetXml = await sheetFile.async("string");
 
-  // 2. Patch each target cell
   let patchedXml = sheetXml;
   for (const [rowNum, price] of Object.entries(prices)) {
     const cellRef = `${unitPriceCol}${rowNum}`;
 
-    // Match the exact cell element, capturing its full opening tag
-    // Handles both empty cells and cells with existing values
     const cellPattern = new RegExp(
       `(<c\\s[^>]*\\br="${cellRef}"[^>]*>)(<[^/].*?</c>|</c>)`,
       "s"
     );
 
     if (cellPattern.test(patchedXml)) {
-      // Cell exists — replace its content
       patchedXml = patchedXml.replace(cellPattern, (_, openTag) => {
-        // Strip t="s" (shared string type) if present, set to numeric
         const cleanTag = openTag.replace(/\s*t="s"/, "");
         return `${cleanTag}<v>${price}</v></c>`;
       });
     } else {
-      // Cell doesn't exist — inject it into the correct <row>
       const rowPattern = new RegExp(
         `(<row[^>]*\\br="${rowNum}"[^>]*>)(.*?)(</row>)`,
         "s"
@@ -353,13 +381,9 @@ export async function injectPricesIntoXlsx(
     }
   }
 
-  // 3. Write patched sheet back — everything else untouched
-  zip.file("xl/worksheets/sheet1.xml", patchedXml);
-
-  // 4. Remove calcChain — Excel rebuilds it automatically, avoids stale ref errors
+  zip.file(sheetZipPath, patchedXml);
   zip.remove("xl/calcChain.xml");
 
-  // 5. Return as ArrayBuffer
   const result = await zip.generateAsync({
     type: "arraybuffer",
     compression: "DEFLATE",
@@ -369,31 +393,34 @@ export async function injectPricesIntoXlsx(
 }
 
 /**
- * Helper: use ExcelJS READ-ONLY to find which column letter is "سعر الوحدة"
+ * Helper: use ExcelJS READ-ONLY to find which column letter is "سعر الوحدة".
+ * Scans ALL sheets and returns both column letter and sheet index (0-based).
  */
 export async function findUnitPriceColumn(
   templateBuffer: ArrayBuffer
-): Promise<string | null> {
+): Promise<{ colLetter: string; sheetIndex: number } | null> {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateBuffer);
-  const sheet = workbook.worksheets[0];
 
   const UP_HEADERS = ['سعر الوحدة', 'سعر الوحده', 'unit price', 'unit_price', 'unitprice'];
 
-  for (let rowNum = 1; rowNum <= Math.min(60, sheet.rowCount); rowNum++) {
-    const row = sheet.getRow(rowNum);
-    let found: string | null = null;
-    row.eachCell({ includeEmpty: false }, (cell, col) => {
-      if (found) return;
-      let v = cell.value;
-      if (v && typeof v === 'object' && 'richText' in (v as object))
-        v = (v as { richText: { text: string }[] }).richText.map(r => r.text).join('');
-      if (typeof v !== 'string') return;
-      const lower = v.trim().toLowerCase();
-      if (UP_HEADERS.some(h => lower.includes(h.toLowerCase())))
-        found = sheet.getColumn(col).letter;
-    });
-    if (found) return found;
+  for (let si = 0; si < workbook.worksheets.length; si++) {
+    const sheet = workbook.worksheets[si];
+    for (let rowNum = 1; rowNum <= Math.min(60, sheet.rowCount); rowNum++) {
+      const row = sheet.getRow(rowNum);
+      let found: string | null = null;
+      row.eachCell({ includeEmpty: false }, (cell, col) => {
+        if (found) return;
+        let v = cell.value;
+        if (v && typeof v === 'object' && 'richText' in (v as object))
+          v = (v as { richText: { text: string }[] }).richText.map(r => r.text).join('');
+        if (typeof v !== 'string') return;
+        const lower = v.trim().toLowerCase();
+        if (UP_HEADERS.some(h => lower.includes(h.toLowerCase())))
+          found = sheet.getColumn(col).letter;
+      });
+      if (found) return { colLetter: found, sheetIndex: si };
+    }
   }
   return null;
 }
@@ -423,16 +450,20 @@ export async function exportBOQ(boqFile: BOQFile, items: BOQItem[]): Promise<Exp
       error: `Storage error: ${(e as Error).message}` };
   }
 
-  const unitPriceCol = await findUnitPriceColumn(buffer);
-  if (!unitPriceCol) {
+  const colResult = await findUnitPriceColumn(buffer);
+  if (!colResult) {
     return { success: false, injected: 0, total: items.length, variance: 0, unmatched: [],
       error: 'تعذّر تحديد عمود سعر الوحدة في الملف. تحقق من رؤوس الأعمدة.' };
   }
 
+  // Resolve which ZIP sheet file corresponds to the detected sheet index
+  const zipForResolve = await JSZip.loadAsync(buffer);
+  const sheetZipPath = await resolveSheetZipPath(zipForResolve, colResult.sheetIndex);
+
   const prices: Record<number, number> = {};
   for (const item of pricedItems) prices[item.row_index] = item.unit_rate!;
 
-  const outBuffer = await injectPricesIntoXlsx(buffer, prices, unitPriceCol);
+  const outBuffer = await injectPricesIntoXlsx(buffer, prices, colResult.colLetter, sheetZipPath);
 
   triggerDownload(outBuffer, `${boqFile.name.replace(/\.xlsx?$/i, '')}_priced.xlsx`);
 
