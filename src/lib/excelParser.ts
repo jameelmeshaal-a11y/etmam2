@@ -207,15 +207,40 @@ export async function parseEtimadBOQ(buffer: ArrayBuffer): Promise<ParseResult> 
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
 
-  const sheet = workbook.worksheets[0];
-  if (!sheet) {
+  if (workbook.worksheets.length === 0) {
     throw new Error('لم يتم العثور على أي صفحة في ملف Excel');
   }
 
-  const detected = detectColumns(sheet);
+  // Find the sheet with the best BOQ header score instead of always using sheet[0]
+  let bestScore = -1;
+  let bestSheet = workbook.worksheets[0];
+  let detected: ReturnType<typeof detectColumns> = null;
+
+  for (const ws of workbook.worksheets) {
+    const d = detectColumns(ws);
+    if (!d) continue;
+    const score = scoreHeaderRow(
+      (() => {
+        const r: Record<number, string> = {};
+        ws.getRow(d.headerRow).eachCell({ includeEmpty: false }, (cell, col) => {
+          const txt = extractCellText(cell.value);
+          if (txt) r[col] = txt;
+        });
+        return r;
+      })()
+    );
+    if (score > bestScore) {
+      bestScore = score;
+      bestSheet = ws;
+      detected = d;
+    }
+  }
+
   if (!detected) {
     throw new Error('تعذر اكتشاف أعمدة BOQ في الملف. تأكد من وجود رؤوس الأعمدة المطلوبة.');
   }
+
+  const sheet = bestSheet;
 
   const { cols, headerRow } = detected;
   const items: ParsedBOQItem[] = [];

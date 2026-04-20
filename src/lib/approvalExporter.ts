@@ -392,9 +392,47 @@ export async function injectPricesIntoXlsx(
   return result;
 }
 
+const BOQ_SCORE_HEADERS = [
+  ['سعر الوحدة', 'سعر الوحده', 'unit price', 'unit_price', 'unitprice'],
+  ['الكمية', 'كمية', 'qty', 'quantity'],
+  ['وصف البند', 'وصف', 'البيان', 'الوصف', 'description'],
+];
+
+function sheetBoqScore(sheet: ExcelJS.Worksheet): { score: number; unitPriceCol: string | null; headerRow: number } {
+  const UP_HEADERS = ['سعر الوحدة', 'سعر الوحده', 'unit price', 'unit_price', 'unitprice'];
+  let bestScore = 0;
+  let bestCol: string | null = null;
+  let bestRow = -1;
+
+  for (let rowNum = 1; rowNum <= Math.min(60, sheet.rowCount); rowNum++) {
+    let score = 0;
+    let upCol: string | null = null;
+    for (let r = rowNum; r <= rowNum + 1; r++) {
+      sheet.getRow(r).eachCell({ includeEmpty: false }, (cell, col) => {
+        let v = cell.value;
+        if (v && typeof v === 'object' && 'richText' in (v as object))
+          v = (v as { richText: { text: string }[] }).richText.map(rt => rt.text).join('');
+        if (typeof v !== 'string') return;
+        const lower = v.trim().toLowerCase();
+        for (const group of BOQ_SCORE_HEADERS) {
+          if (group.some(h => lower.includes(h.toLowerCase()))) { score++; break; }
+        }
+        if (UP_HEADERS.some(h => lower.includes(h.toLowerCase())) && !upCol)
+          upCol = sheet.getColumn(col).letter;
+      });
+    }
+    if (score > bestScore && upCol) {
+      bestScore = score;
+      bestCol = upCol;
+      bestRow = rowNum;
+    }
+  }
+  return { score: bestScore, unitPriceCol: bestCol, headerRow: bestRow };
+}
+
 /**
  * Helper: use ExcelJS READ-ONLY to find which column letter is "سعر الوحدة".
- * Scans ALL sheets and returns both column letter and sheet index (0-based).
+ * Picks the sheet with the strongest BOQ header match (same sheet used during parsing).
  */
 export async function findUnitPriceColumn(
   templateBuffer: ArrayBuffer
@@ -402,26 +440,20 @@ export async function findUnitPriceColumn(
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateBuffer);
 
-  const UP_HEADERS = ['سعر الوحدة', 'سعر الوحده', 'unit price', 'unit_price', 'unitprice'];
+  let bestScore = 0;
+  let bestCol: string | null = null;
+  let bestSheet = -1;
 
   for (let si = 0; si < workbook.worksheets.length; si++) {
-    const sheet = workbook.worksheets[si];
-    for (let rowNum = 1; rowNum <= Math.min(60, sheet.rowCount); rowNum++) {
-      const row = sheet.getRow(rowNum);
-      let found: string | null = null;
-      row.eachCell({ includeEmpty: false }, (cell, col) => {
-        if (found) return;
-        let v = cell.value;
-        if (v && typeof v === 'object' && 'richText' in (v as object))
-          v = (v as { richText: { text: string }[] }).richText.map(r => r.text).join('');
-        if (typeof v !== 'string') return;
-        const lower = v.trim().toLowerCase();
-        if (UP_HEADERS.some(h => lower.includes(h.toLowerCase())))
-          found = sheet.getColumn(col).letter;
-      });
-      if (found) return { colLetter: found, sheetIndex: si };
+    const { score, unitPriceCol } = sheetBoqScore(workbook.worksheets[si]);
+    if (score > bestScore && unitPriceCol) {
+      bestScore = score;
+      bestCol = unitPriceCol;
+      bestSheet = si;
     }
   }
+
+  if (bestCol && bestSheet >= 0) return { colLetter: bestCol, sheetIndex: bestSheet };
   return null;
 }
 
