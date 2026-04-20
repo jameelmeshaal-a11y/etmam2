@@ -1,3 +1,6 @@
+// ⛔ LOCKED FILE — DO NOT MODIFY WITHOUT EXPLICIT USER PERMISSION
+// Last approved state: 2026-04-20
+// Any change to this file requires user to say: "افتح ملف priceLibrary.ts"
 import { supabase } from './supabase';
 import { generateKeywords } from './matchingV3';
 import type { RateLibraryItem } from '../types';

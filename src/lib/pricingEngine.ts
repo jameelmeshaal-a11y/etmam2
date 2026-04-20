@@ -1,3 +1,6 @@
+// ⛔ LOCKED FILE — DO NOT MODIFY WITHOUT EXPLICIT USER PERMISSION
+// Last approved state: 2026-04-20
+// Any change to this file requires user to say: "افتح ملف pricingEngine.ts"
 import { supabase } from './supabase';
 import type { RateLibraryItem } from '../types';
 

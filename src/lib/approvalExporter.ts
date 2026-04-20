@@ -1,3 +1,6 @@
+// ⛔ LOCKED FILE — DO NOT MODIFY WITHOUT EXPLICIT USER PERMISSION
+// Last approved state: 2026-04-20
+// Any change to this file requires user to say: "افتح ملف approvalExporter.ts"
 import ExcelJS from 'exceljs';
 // @ts-expect-error — jszip ships no bundled types but is present as ExcelJS dependency
 import JSZip from 'jszip';
