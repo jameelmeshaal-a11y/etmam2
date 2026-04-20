@@ -614,19 +614,15 @@ export default function BOQTable({ boqFileId, boqFile, onBack }: BOQTableProps) 
                       <div className="flex items-center gap-1 justify-center">
                         {isManual ? (
                           <span title="مقفل يدوياً"><Lock size={14} className="text-blue-400" /></span>
-                        ) : isBMS ? (
-                          null
-                        ) : (
-                          !isDescriptive && (
-                            <button
-                              onClick={() => handleRepriceSingle(item.id)}
-                              disabled={isRepricingThis || pricingState.active}
-                              title="إعادة التسعير"
-                              className="w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:bg-amber-50 hover:text-amber-600 transition-colors disabled:opacity-40"
-                            >
-                              <RefreshCw size={14} className={isRepricingThis ? 'animate-spin' : ''} />
-                            </button>
-                          )
+                        ) : !isDescriptive && (
+                          <button
+                            onClick={() => handleRepriceSingle(item.id)}
+                            disabled={isRepricingThis || pricingState.active}
+                            title="إعادة التسعير"
+                            className="w-7 h-7 rounded-md flex items-center justify-center text-slate-400 hover:bg-amber-50 hover:text-amber-600 transition-colors disabled:opacity-40"
+                          >
+                            <RefreshCw size={14} className={isRepricingThis ? 'animate-spin' : ''} />
+                          </button>
                         )}
                         {isPending && (
                           <button
@@ -638,7 +634,7 @@ export default function BOQTable({ boqFileId, boqFile, onBack }: BOQTableProps) 
                             <Check size={14} className={isApprovingThis ? 'animate-pulse' : ''} />
                           </button>
                         )}
-                        {!isDescriptive && (isBMSItem(item.description) ? (
+                        {!isDescriptive && (isBMS ? (
                           <button
                             onClick={() => setBmsItem(item)}
                             title="حاسبة BMS"
