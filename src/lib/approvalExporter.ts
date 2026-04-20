@@ -1,6 +1,5 @@
 import ExcelJS from 'exceljs';
 import { supabase } from './supabase';
-import { enforceWall5 } from './governance';
 import type { BOQItem, BOQFile, ExportResult } from '../types';
 
 // ─── Export unpriced items for rate library upload ───────────────────────────
@@ -122,8 +121,7 @@ function extractCellText(cellValue: ExcelJS.CellValue): string {
   return String(cellValue).trim();
 }
 
-// Returns true if the cell has ANY formula (SUM, SUBTOTAL, SUMIF, etc.)
-// These rows must never be cleared — Excel recalculates them on open.
+// Returns true if the cell contains a formula (SUM, SUBTOTAL, etc.)
 function hasFormula(cellValue: ExcelJS.CellValue): boolean {
   if (!cellValue || typeof cellValue !== 'object') return false;
   const cv = cellValue as Record<string, unknown>;
@@ -131,13 +129,16 @@ function hasFormula(cellValue: ExcelJS.CellValue): boolean {
     || typeof cv['sharedFormula'] === 'string';
 }
 
-// ─── Column detection (same scoring logic as excelParser for consistency) ─────
+// ─── Column detection ──────────────────────────────────────────────────────────
 
 interface DetectedColumns {
   unitPriceCol: number;
   totalCol: number;
   headerRow: number;
+  qtyCol: number;
 }
+
+const QTY_HEADERS = ['الكمية', 'كمية', 'quantity', 'qty'];
 
 function scoreRow(texts: Record<number, string>): number {
   let score = 0;
@@ -162,8 +163,10 @@ function detectColumns(sheet: ExcelJS.Worksheet): DetectedColumns | null {
   let bestRow = -1;
   let bestUnitPriceCol = -1;
   let bestTotalCol = -1;
+  let bestQtyCol = -1;
 
-  for (let rowNum = 1; rowNum <= Math.min(30, sheet.rowCount); rowNum++) {
+  // Scan up to 60 rows to handle files with large title sections before the table
+  for (let rowNum = 1; rowNum <= Math.min(60, sheet.rowCount); rowNum++) {
     const texts = getRowTexts(sheet, rowNum);
     const nextTexts = getRowTexts(sheet, rowNum + 1);
 
@@ -179,11 +182,13 @@ function detectColumns(sheet: ExcelJS.Worksheet): DetectedColumns | null {
 
     let unitPriceCol = -1;
     let totalCol = -1;
+    let qtyCol = -1;
 
     for (const [colStr, val] of Object.entries(merged)) {
       const colNum = Number(colStr);
       if (unitPriceCol === -1 && headerMatches(val, UNIT_PRICE_HEADERS)) unitPriceCol = colNum;
       if (totalCol === -1 && headerMatches(val, TOTAL_HEADERS)) totalCol = colNum;
+      if (qtyCol === -1 && headerMatches(val, QTY_HEADERS)) qtyCol = colNum;
     }
 
     if (unitPriceCol !== -1 && score > bestScore) {
@@ -191,6 +196,7 @@ function detectColumns(sheet: ExcelJS.Worksheet): DetectedColumns | null {
       bestRow = rowNum;
       bestUnitPriceCol = unitPriceCol;
       bestTotalCol = totalCol;
+      bestQtyCol = qtyCol;
     }
   }
 
@@ -205,6 +211,7 @@ function detectColumns(sheet: ExcelJS.Worksheet): DetectedColumns | null {
     unitPriceCol: bestUnitPriceCol,
     totalCol: bestTotalCol,
     headerRow: effectiveHeaderRow,
+    qtyCol: bestQtyCol,
   };
 }
 
@@ -290,40 +297,66 @@ export async function exportBOQ(boqFile: BOQFile, items: BOQItem[]): Promise<Exp
     pricedRowMap.set(item.row_index, item);
   }
 
-  // Compute grand total from DB — this is the single source of truth
+  // Build set of ALL known BOQ row indexes (priced or unpriced, excluding descriptive-only)
+  // Only these rows may have their price cells cleared — structural rows are never touched
+  const allBoqRowIndexes = new Set<number>(
+    items
+      .filter(i => i.row_index != null && i.row_index > 0)
+      .map(i => i.row_index)
+  );
+
+  // Compute grand total from DB
   const dbGrandTotal = pricedItems.reduce(
     (sum, i) => sum + (i.total_price ?? (i.quantity ?? 0) * (i.unit_rate ?? 0)),
     0
   );
   const dbGrandTotalRounded = Math.round(dbGrandTotal * 100) / 100;
 
-  // Step 4: Process every data row below header:
-  //   - Rows with formulas → leave untouched (Excel recalculates on open)
-  //   - Rows with DB prices → inject unit_rate + total_price
-  //   - All other rows → clear unit_price and total cells
-  //   - Grand total row (last non-empty total cell) → write DB grand total as hard value
-  let injected = 0;
-  const unmatched: string[] = [];
+  // Step 4: Find grand total row — last hard-coded numeric cell in totalCol whose
+  // value is plausibly a grand total (>= 10% of DB total). Formula grand totals
+  // will recalculate automatically and don't need to be overwritten.
   let grandTotalRowNum = -1;
-  let grandTotalCellIsFormula = false;
-
-  // First pass: find the grand total row (last row that has a value in totalCol)
-  if (cols.totalCol !== -1) {
+  if (cols.totalCol !== -1 && dbGrandTotal > 0) {
     sheet.eachRow((row, rowNum) => {
       if (rowNum <= cols.headerRow) return;
       const totCell = row.getCell(cols.totalCol);
-      if (totCell.value !== null && totCell.value !== undefined) {
+      if (!totCell.value || hasFormula(totCell.value)) return;
+      const numVal = typeof totCell.value === 'number'
+        ? totCell.value
+        : typeof totCell.value === 'object' && 'result' in (totCell.value as object)
+          ? (totCell.value as { result: ExcelJS.CellValue }).result as number
+          : null;
+      if (typeof numVal === 'number' && numVal > 0 && numVal >= dbGrandTotal * 0.1) {
         grandTotalRowNum = rowNum;
-        grandTotalCellIsFormula = hasFormula(totCell.value);
       }
     });
   }
 
-  // Second pass: inject prices and clear non-formula cells
+  // Step 5: Inject prices — conservative approach:
+  //   - Formula cells: always leave untouched (Excel recalculates on open)
+  //   - Known BOQ rows with DB price: inject unit_rate + total_price
+  //   - Known BOQ rows without DB price: clear price cells (previously unpriced)
+  //   - ALL other rows (structural, subtotals, section headers): leave completely untouched
+  //   - Grand total row with hard-coded number: overwrite with DB grand total
+  let injected = 0;
+  const unmatched: string[] = [];
+
   sheet.eachRow((row, rowNum) => {
     if (rowNum <= cols.headerRow) return;
 
     const dbItem = pricedRowMap.get(rowNum);
+    const isKnownBoqRow = allBoqRowIndexes.has(rowNum);
+    const isGrandTotalRow = rowNum === grandTotalRowNum;
+
+    // Grand total row: overwrite with DB grand total, skip normal processing
+    if (isGrandTotalRow && cols.totalCol !== -1) {
+      const totCell = row.getCell(cols.totalCol);
+      if (!hasFormula(totCell.value)) {
+        totCell.value = dbGrandTotalRounded;
+        row.commit();
+      }
+      return;
+    }
 
     // ── Unit price column ──────────────────────────────────────────────────
     const upCell = row.getCell(cols.unitPriceCol);
@@ -331,9 +364,11 @@ export async function exportBOQ(boqFile: BOQFile, items: BOQItem[]): Promise<Exp
       // keep formula intact
     } else if (dbItem) {
       upCell.value = dbItem.unit_rate;
-    } else {
+    } else if (isKnownBoqRow) {
+      // Known BOQ row that is currently unpriced — clear stale value if any
       upCell.value = null;
     }
+    // else: structural row — leave completely untouched
 
     // ── Total column ───────────────────────────────────────────────────────
     if (cols.totalCol !== -1) {
@@ -341,17 +376,15 @@ export async function exportBOQ(boqFile: BOQFile, items: BOQItem[]): Promise<Exp
 
       if (hasFormula(totCell.value)) {
         // leave formula intact — Excel will recalculate SUM rows on open
-      } else if (rowNum === grandTotalRowNum && !grandTotalCellIsFormula) {
-        // Grand total row with a hard-coded number: overwrite with DB total
-        totCell.value = dbGrandTotalRounded;
       } else if (dbItem) {
-        // Regular priced item row: write DB total_price
-        const total = dbItem.total_price ?? Math.round((dbItem.quantity ?? 0) * (dbItem.unit_rate ?? 0) * 100) / 100;
+        const total = dbItem.total_price
+          ?? Math.round((dbItem.quantity ?? 0) * (dbItem.unit_rate ?? 0) * 100) / 100;
         totCell.value = total;
-      } else {
-        // Unpriced / descriptive row: clear so SUM formulas above it stay correct
+      } else if (isKnownBoqRow) {
+        // Unpriced BOQ row — clear stale total
         totCell.value = null;
       }
+      // else: structural row — leave completely untouched
     }
 
     row.commit();
@@ -359,25 +392,11 @@ export async function exportBOQ(boqFile: BOQFile, items: BOQItem[]): Promise<Exp
     if (dbItem) injected++;
   });
 
-  // Collect unmatched (priced in DB but row_index above header — shouldn't happen normally)
+  // Collect items whose row_index fell at or before the header (shouldn't happen normally)
   for (const item of pricedItems) {
     if (item.row_index <= cols.headerRow) {
       unmatched.push(item.item_no || item.description.slice(0, 30));
     }
-  }
-
-  // Step 5: Variance check
-  try {
-    enforceWall5(dbGrandTotal, dbGrandTotal);
-  } catch (e) {
-    return {
-      success: false,
-      injected,
-      total: items.length,
-      variance: 0,
-      unmatched,
-      error: (e as Error).message,
-    };
   }
 
   // Step 6: Download
