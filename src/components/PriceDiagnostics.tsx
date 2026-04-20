@@ -27,7 +27,7 @@ const BUCKETS: ConfidenceBucket[] = [
 ];
 
 const sarFormat = (v: number | null) =>
-  v == null ? '—' : new Intl.NumberFormat('ar-SA', { style: 'currency', currency: 'SAR' }).format(v);
+  v == null ? '—' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'SAR' }).format(v);
 
 export default function PriceDiagnostics({ items, onRepriced }: PriceDiagnosticsProps) {
   const [repricingId, setRepricingId] = useState<string | null>(null);

@@ -25,7 +25,7 @@ const SOURCE_COLORS: Record<SourceType, string> = {
 };
 
 const sarFormat = (v: number) =>
-  new Intl.NumberFormat('ar-SA', { style: 'currency', currency: 'SAR', maximumFractionDigits: 0 }).format(v);
+  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'SAR', maximumFractionDigits: 0 }).format(v);
 
 interface FormData {
   id?: string;

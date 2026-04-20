@@ -27,7 +27,7 @@ interface ProjectSummary extends Project {
 }
 
 const sarFormat = (v: number) =>
-  new Intl.NumberFormat('ar-SA', { style: 'currency', currency: 'SAR', maximumFractionDigits: 0 }).format(v);
+  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'SAR', maximumFractionDigits: 0 }).format(v);
 
 export default function BOQSummaryPage({ onNavigate }: BOQSummaryPageProps) {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -139,7 +139,7 @@ export default function BOQSummaryPage({ onNavigate }: BOQSummaryPageProps) {
     titleRow.alignment = { horizontal: 'right' };
     ws.mergeCells(`A${titleRow.number}:F${titleRow.number}`);
 
-    const subRow = ws.addRow([`الجهة: ${summary.client || '—'} | المدينة: ${summary.city || '—'} | تاريخ التقرير: ${new Date().toLocaleDateString('ar-SA')}`]);
+    const subRow = ws.addRow([`الجهة: ${summary.client || '—'} | المدينة: ${summary.city || '—'} | تاريخ التقرير: ${new Date().toLocaleDateString('en-GB')}`]);
     subRow.font = { size: 10, color: { argb: 'FF64748B' } };
     subRow.alignment = { horizontal: 'right' };
     ws.mergeCells(`A${subRow.number}:F${subRow.number}`);
@@ -192,7 +192,7 @@ export default function BOQSummaryPage({ onNavigate }: BOQSummaryPageProps) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `ملخص_${summary.name}_${new Date().toLocaleDateString('ar-SA').replace(/\//g, '-')}.xlsx`;
+    a.download = `ملخص_${summary.name}_${new Date().toLocaleDateString('en-GB').replace(/\//g, '-')}.xlsx`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -246,13 +246,13 @@ export default function BOQSummaryPage({ onNavigate }: BOQSummaryPageProps) {
               icon={<FileText size={20} className="text-blue-600" />}
               bg="bg-blue-50"
               label="إجمالي البنود"
-              value={summary.total_items.toLocaleString('ar-SA')}
+              value={summary.total_items.toLocaleString('en-US')}
             />
             <SummaryCard
               icon={<CheckCircle size={20} className="text-emerald-600" />}
               bg="bg-emerald-50"
               label="البنود المُسعَّرة"
-              value={summary.priced_items.toLocaleString('ar-SA')}
+              value={summary.priced_items.toLocaleString('en-US')}
             />
             <SummaryCard
               icon={<TrendingUp size={20} className="text-amber-600" />}
@@ -335,19 +335,19 @@ export default function BOQSummaryPage({ onNavigate }: BOQSummaryPageProps) {
                             </div>
                           </td>
                           <td className="px-4 py-4 text-center">
-                            <span className="text-sm font-medium text-slate-700">{file.actual_total.toLocaleString('ar-SA')}</span>
+                            <span className="text-sm font-medium text-slate-700">{file.actual_total.toLocaleString('en-US')}</span>
                           </td>
                           <td className="px-4 py-4 text-center">
                             <span className="inline-flex items-center gap-1 text-sm font-semibold text-emerald-700">
                               <CheckCircle size={13} />
-                              {file.actual_priced.toLocaleString('ar-SA')}
+                              {file.actual_priced.toLocaleString('en-US')}
                             </span>
                           </td>
                           <td className="px-4 py-4 text-center">
                             {pending > 0 ? (
                               <span className="inline-flex items-center gap-1 text-sm text-amber-600">
                                 <Clock size={13} />
-                                {pending.toLocaleString('ar-SA')}
+                                {pending.toLocaleString('en-US')}
                               </span>
                             ) : (
                               <span className="text-sm text-slate-300">—</span>
@@ -386,14 +386,14 @@ export default function BOQSummaryPage({ onNavigate }: BOQSummaryPageProps) {
                         <span className="text-sm font-bold text-slate-900">الإجمالي</span>
                       </td>
                       <td className="px-4 py-4 text-center">
-                        <span className="text-sm font-bold text-slate-900">{summary.total_items.toLocaleString('ar-SA')}</span>
+                        <span className="text-sm font-bold text-slate-900">{summary.total_items.toLocaleString('en-US')}</span>
                       </td>
                       <td className="px-4 py-4 text-center">
-                        <span className="text-sm font-bold text-emerald-700">{summary.priced_items.toLocaleString('ar-SA')}</span>
+                        <span className="text-sm font-bold text-emerald-700">{summary.priced_items.toLocaleString('en-US')}</span>
                       </td>
                       <td className="px-4 py-4 text-center">
                         <span className="text-sm font-bold text-amber-600">
-                          {(summary.total_items - summary.priced_items).toLocaleString('ar-SA')}
+                          {(summary.total_items - summary.priced_items).toLocaleString('en-US')}
                         </span>
                       </td>
                       <td className="px-4 py-4 text-left">

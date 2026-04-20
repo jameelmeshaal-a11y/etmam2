@@ -23,7 +23,7 @@ interface BOQTableProps {
 }
 
 const sarFormat = (v: number | null) =>
-  v == null ? '—' : new Intl.NumberFormat('ar-SA', { style: 'currency', currency: 'SAR' }).format(v);
+  v == null ? '—' : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'SAR' }).format(v);
 
 function confidenceColor(c: number): string {
   if (c >= 95) return 'text-emerald-700 bg-emerald-50';
@@ -590,7 +590,7 @@ export default function BOQTable({ boqFileId, boqFile, onBack }: BOQTableProps) 
                     </td>
                     <td className="px-2 py-2.5 text-xs text-slate-600 text-center">{item.unit || '—'}</td>
                     <td className="px-2 py-2.5 text-xs text-slate-700 text-center ltr">
-                      {item.quantity != null ? item.quantity.toLocaleString('ar-SA') : '—'}
+                      {item.quantity != null ? item.quantity.toLocaleString('en-US') : '—'}
                     </td>
                     <td className="px-2 py-2.5 text-xs font-medium text-slate-800 ltr text-left">
                       {sarFormat(item.unit_rate)}
@@ -740,7 +740,7 @@ function PricingProgressBar({ progress }: { progress: PricingProgress }) {
             <span className="text-xs text-amber-700"><span className="font-bold">{progress.failedSoFar}</span> بدون تطابق</span>
           )}
           <span className="text-sm font-bold text-blue-900 ltr">
-            {new Intl.NumberFormat('ar-SA', { style: 'currency', currency: 'SAR', maximumFractionDigits: 0 }).format(progress.runningTotal)}
+            {new Intl.NumberFormat('en-US', { style: 'currency', currency: 'SAR', maximumFractionDigits: 0 }).format(progress.runningTotal)}
           </span>
         </div>
       </div>

@@ -38,7 +38,7 @@ const GOVERNANCE_WALLS: GovernanceWall[] = [
 ];
 
 const sarFormat = (v: number) =>
-  new Intl.NumberFormat('ar-SA', { style: 'currency', currency: 'SAR' }).format(v);
+  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'SAR' }).format(v);
 
 export default function AdminPage({ onNavigate: _onNavigate }: AdminPageProps) {
   const [migrations, setMigrations] = useState<Migration[]>([]);
@@ -183,7 +183,7 @@ export default function AdminPage({ onNavigate: _onNavigate }: AdminPageProps) {
                     <p className="text-xs font-medium text-slate-700 truncate">{m.name || m.version}</p>
                   </div>
                   <span className="text-xs text-slate-400 flex-shrink-0 ltr">
-                    {m.inserted_at ? new Date(m.inserted_at).toLocaleDateString('ar-SA') : ''}
+                    {m.inserted_at ? new Date(m.inserted_at).toLocaleDateString('en-GB') : ''}
                   </span>
                 </div>
               ))}
@@ -226,7 +226,7 @@ export default function AdminPage({ onNavigate: _onNavigate }: AdminPageProps) {
                   </div>
                   <span className="text-xs font-medium text-slate-700 ltr flex-shrink-0">{sarFormat(entry.unit_rate)}</span>
                   <span className="text-xs text-slate-400 flex-shrink-0 ltr">
-                    {new Date(entry.created_at).toLocaleDateString('ar-SA')}
+                    {new Date(entry.created_at).toLocaleDateString('en-GB')}
                   </span>
                 </div>
               ))}

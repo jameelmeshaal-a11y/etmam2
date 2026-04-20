@@ -9,7 +9,7 @@ interface DashboardPageProps {
 }
 
 const sarFormat = (v: number) =>
-  new Intl.NumberFormat('ar-SA', { style: 'currency', currency: 'SAR', maximumFractionDigits: 0 }).format(v);
+  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'SAR', maximumFractionDigits: 0 }).format(v);
 
 interface Stats {
   totalProjects: number;
@@ -117,7 +117,7 @@ export default function DashboardPage({ onNavigate }: DashboardPageProps) {
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
           <StatCard icon={FolderOpen} label="إجمالي المشاريع" value={stats.totalProjects} color="bg-blue-600" />
           <StatCard icon={FileSpreadsheet} label="ملفات BOQ" value={stats.totalBOQFiles} color="bg-slate-700" />
-          <StatCard icon={TrendingUp} label="بنود مُسعَّرة" value={stats.totalItemsPriced.toLocaleString('ar-SA')} color="bg-emerald-600" />
+          <StatCard icon={TrendingUp} label="بنود مُسعَّرة" value={stats.totalItemsPriced.toLocaleString('en-US')} color="bg-emerald-600" />
           <StatCard icon={DollarSign} label="القيمة الإجمالية" value={sarFormat(stats.totalSARValue)} color="bg-amber-500" />
         </div>
       )}

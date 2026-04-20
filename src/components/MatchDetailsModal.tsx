@@ -9,7 +9,7 @@ interface MatchDetailsModalProps {
 }
 
 const sarFormat = (v: number) =>
-  new Intl.NumberFormat('ar-SA', { style: 'currency', currency: 'SAR' }).format(v);
+  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'SAR' }).format(v);
 
 function ConfidenceBar({ value }: { value: number }) {
   let colorClass = 'bg-red-500';

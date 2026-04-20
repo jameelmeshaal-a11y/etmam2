@@ -12,7 +12,7 @@ interface PriceBreakdownModalProps {
 type InputMode = 'unit' | 'total';
 
 const sarFormat = (v: number) =>
-  new Intl.NumberFormat('ar-SA', { style: 'currency', currency: 'SAR' }).format(v);
+  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'SAR' }).format(v);
 
 export default function PriceBreakdownModal({ item, onClose, onSaved }: PriceBreakdownModalProps) {
   const qty = item.quantity ?? 0;
@@ -103,7 +103,7 @@ export default function PriceBreakdownModal({ item, onClose, onSaved }: PriceBre
               الوحدة: <span className="font-medium text-blue-700 bg-blue-50 px-2 py-0.5 rounded mr-1">{item.unit || '—'}</span>
             </span>
             <span className="text-xs text-slate-500">
-              الكمية: <span className="font-medium text-slate-700 mr-1">{qty.toLocaleString('ar-SA')}</span>
+              الكمية: <span className="font-medium text-slate-700 mr-1">{qty.toLocaleString('en-US')}</span>
             </span>
           </div>
         </div>
@@ -200,7 +200,7 @@ export default function PriceBreakdownModal({ item, onClose, onSaved }: PriceBre
             </div>
             {qty > 0 && (
               <div className="flex items-center justify-between mt-0.5">
-                <span className="text-xs text-blue-700">الإجمالي ({qty.toLocaleString('ar-SA')} {item.unit})</span>
+                <span className="text-xs text-blue-700">الإجمالي ({qty.toLocaleString('en-US')} {item.unit})</span>
                 <span className="text-sm font-bold text-blue-900 ltr">{sarFormat(derivedTotal)}</span>
               </div>
             )}

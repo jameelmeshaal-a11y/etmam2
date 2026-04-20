@@ -73,7 +73,7 @@ const EQUIPMENT_GROUPS: EquipmentGroup[] = [
 ];
 
 const sarFormat = (v: number) =>
-  new Intl.NumberFormat('ar-SA', { style: 'currency', currency: 'SAR', maximumFractionDigits: 0 }).format(v);
+  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'SAR', maximumFractionDigits: 0 }).format(v);
 
 function pointsPerEquipment(eq: Equipment): number {
   return eq.ai + eq.di + eq.ao + eq.do_;
@@ -352,7 +352,7 @@ export default function BMSCalculatorModal({ item, boqFileId, onClose, onSaved }
                             <div className="flex items-center gap-2 flex-shrink-0">
                               {n > 0 && (
                                 <span className="text-xs text-slate-500 w-20 text-left ltr">
-                                  = {(pts * n).toLocaleString('ar-SA')} نقطة
+                                  = {(pts * n).toLocaleString('en-US')} نقطة
                                 </span>
                               )}
                               <div className="flex items-center gap-1">
@@ -388,7 +388,7 @@ export default function BMSCalculatorModal({ item, boqFileId, onClose, onSaved }
           <div className="px-6 py-4 flex items-center justify-between bg-slate-50 border-b border-slate-100">
             <div>
               <p className="text-xs text-slate-500">إجمالي نقاط النظام</p>
-              <p className="text-xl font-bold text-slate-900">{totalPoints.toLocaleString('ar-SA')} نقطة</p>
+              <p className="text-xl font-bold text-slate-900">{totalPoints.toLocaleString('en-US')} نقطة</p>
             </div>
             <div className="text-left">
               <p className="text-xs text-slate-500">التكلفة التقديرية (500 ر.س / نقطة)</p>
