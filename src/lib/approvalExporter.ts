@@ -215,43 +215,89 @@ export async function injectPricesIntoXlsx(
   const sheetFile = zip.file(sheetXmlPath);
   if (!sheetFile) throw new Error(`Sheet not found in ZIP: ${sheetXmlPath}`);
   const sheetXml: string = await sheetFile.async("string");
+
+  // Process the XML character-by-character to find and patch only the <v> element
+  // inside the exact target cell. This approach:
+  //   - Never touches any other cell, formula, style, or attribute
+  //   - Handles self-closing cells, shared-string cells, formula cells identically
+  //   - Is immune to regex greediness across adjacent cells
   let patchedXml = sheetXml;
 
   for (const [rowNum, price] of Object.entries(prices)) {
     const cellRef = `${unitPriceCol}${rowNum}`;
-    // Match ANY form of the cell: self-closing or with children, any attributes
-    // Replace the entire element with a minimal numeric cell — no t="s", no formula
-    const cellPattern = new RegExp(
-      `<c\\b[^>]*\\br="${cellRef}"[^>]*(\\/>|>[\\s\\S]*?<\\/c>)`,
-      "g"
-    );
 
-    if (cellPattern.test(patchedXml)) {
-      // Reset lastIndex after .test()
-      patchedXml = patchedXml.replace(
-        new RegExp(`<c\\b[^>]*\\br="${cellRef}"[^>]*(\\/>|>[\\s\\S]*?<\\/c>)`, "g"),
-        `<c r="${cellRef}"><v>${price}</v></c>`
-      );
-    } else {
-      // Cell doesn't exist in this row — insert it inside the row element
-      const rowPattern = new RegExp(
-        `(<row[^>]*\\br="${rowNum}"[^>]*>)([\\s\\S]*?)(<\\/row>)`,
-        "g"
-      );
-      patchedXml = patchedXml.replace(rowPattern, (_, rowOpen, rowContent, rowClose) => {
-        return `${rowOpen}${rowContent}<c r="${cellRef}"><v>${price}</v></c>${rowClose}`;
-      });
+    // Step 1: Find the opening tag of this exact cell.
+    // We look for r="CELLREF" surrounded by word boundaries inside a <c ...> tag.
+    // Using a non-greedy match limited to the opening tag only ([^>]* never crosses >).
+    const openTagRe = new RegExp(`<c\\b([^>]*\\br="${cellRef}"[^>]*)>`, "");
+    const openTagSelfRe = new RegExp(`<c\\b([^>]*\\br="${cellRef}"[^>]*)\\/>`, "");
+
+    const selfCloseMatch = openTagSelfRe.exec(patchedXml);
+    if (selfCloseMatch) {
+      // Self-closing cell <c r="G5"/> — expand it with just <v>price</v>, keep all attributes
+      // except t="s" (shared-string type, not valid for numeric cells)
+      const attrs = selfCloseMatch[1].replace(/\s*t="[^"]*"/, "");
+      patchedXml = patchedXml.slice(0, selfCloseMatch.index)
+        + `<c${attrs}><v>${price}</v></c>`
+        + patchedXml.slice(selfCloseMatch.index + selfCloseMatch[0].length);
+      continue;
     }
+
+    const openMatch = openTagRe.exec(patchedXml);
+    if (openMatch) {
+      // Find the </c> that closes this specific cell.
+      // We advance past the opening tag then find the first </c> — safe because
+      // <c> elements are never nested in OOXML.
+      const afterOpen = openMatch.index + openMatch[0].length;
+      const closeIdx = patchedXml.indexOf("</c>", afterOpen);
+      if (closeIdx === -1) continue;
+
+      const innerContent = patchedXml.slice(afterOpen, closeIdx);
+
+      // Remove t="s" (shared string) from the opening tag — we're writing a number
+      const cleanAttrs = openMatch[1].replace(/\s*t="[^"]*"/, "");
+
+      // Keep any <f>...</f> formula element untouched — just replace/add <v>
+      let newInner: string;
+      if (/<f[\s>]/.test(innerContent)) {
+        // Cell has a formula — preserve the <f> element, update only <v>
+        if (/<v>/.test(innerContent)) {
+          newInner = innerContent.replace(/<v>[^<]*<\/v>/, `<v>${price}</v>`);
+        } else {
+          newInner = innerContent + `<v>${price}</v>`;
+        }
+      } else {
+        // No formula — replace the entire content with just the value
+        newInner = `<v>${price}</v>`;
+      }
+
+      patchedXml = patchedXml.slice(0, openMatch.index)
+        + `<c${cleanAttrs}>${newInner}</c>`
+        + patchedXml.slice(closeIdx + "</c>".length);
+      continue;
+    }
+
+    // Cell doesn't exist in the XML — insert a new cell inside the row element.
+    // Append before </row> so column order doesn't matter (Excel sorts on load).
+    const rowCloseRe = new RegExp(`(</row>)`, "");
+    // Find the specific row first
+    const rowRe = new RegExp(`<row\\b[^>]*\\br="${rowNum}"[^>]*>[\\s\\S]*?</row>`, "");
+    const rowMatch = rowRe.exec(patchedXml);
+    if (rowMatch) {
+      const newRow = rowMatch[0].replace(/<\/row>$/, `<c r="${cellRef}"><v>${price}</v></c></row>`);
+      patchedXml = patchedXml.slice(0, rowMatch.index) + newRow + patchedXml.slice(rowMatch.index + rowMatch[0].length);
+    }
+    void rowCloseRe; // suppress unused warning
   }
 
   // @ts-expect-error — dynamic JSZip API
   zip.file(sheetXmlPath, patchedXml);
 
-  // Remove calcChain so Excel doesn't try to validate stale calculation order
+  // Remove calcChain — Excel rebuilds it. Without this Excel may show stale totals.
   // @ts-expect-error — dynamic JSZip API
   zip.remove("xl/calcChain.xml");
 
-  // Tell Excel to recalculate all formulas on open (so totals reflect injected prices)
+  // Force full recalculation on open so formula totals reflect the injected prices
   try {
     // @ts-expect-error — dynamic JSZip API
     const wbFile = zip.file("xl/workbook.xml");
@@ -259,18 +305,24 @@ export async function injectPricesIntoXlsx(
       const wbXml: string = await wbFile.async("string");
       let updatedWb = wbXml;
       if (/<calcPr\b/.test(updatedWb)) {
-        updatedWb = updatedWb.replace(/<calcPr\b[^>]*\/>/,
-          '<calcPr calcCompleted="0" calcMode="auto" fullCalcOnLoad="1"/>');
+        // Replace existing <calcPr .../> with one that forces full recalc
+        updatedWb = updatedWb.replace(
+          /<calcPr\b[^>]*\/>/,
+          '<calcPr calcCompleted="0" calcMode="auto" fullCalcOnLoad="1"/>'
+        );
       } else {
-        updatedWb = updatedWb.replace('</workbook>', '<calcPr calcCompleted="0" calcMode="auto" fullCalcOnLoad="1"/></workbook>');
+        updatedWb = updatedWb.replace(
+          "</workbook>",
+          '<calcPr calcCompleted="0" calcMode="auto" fullCalcOnLoad="1"/></workbook>'
+        );
       }
       // @ts-expect-error — dynamic JSZip API
       zip.file("xl/workbook.xml", updatedWb);
     }
-  } catch (_) { /* non-fatal: file still opens, just needs manual recalc */ }
+  } catch (_) { /* non-fatal */ }
 
-  // IMPORTANT: do NOT pass compression option — preserves each file's original
-  // compression method (STORE vs DEFLATE), preventing ZIP central-directory corruption
+  // Do NOT force compression — preserve each file's original compression method.
+  // Forcing DEFLATE on metadata files ([Content_Types].xml, *.rels) breaks Excel's ZIP reader.
   return await zip.generateAsync({ type: "arraybuffer" });
 }
 
