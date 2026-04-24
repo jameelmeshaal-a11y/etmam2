@@ -60,14 +60,23 @@ export default function DashboardPage({ onNavigate }: DashboardPageProps) {
         const [projectsRes, boqFilesRes, boqItemsRes] = await Promise.all([
           supabase.from('projects').select('*').order('created_at', { ascending: false }),
           supabase.from('boq_files').select('*'),
-          supabase.from('boq_items').select('status, unit_rate, quantity, boq_file_id').in('status', ['approved', 'manual']),
+          supabase.from('boq_items').select('status, unit_rate, quantity, boq_file_id'),
         ]);
 
         const projects = (projectsRes.data ?? []) as Project[];
         const boqFiles = (boqFilesRes.data ?? []) as BOQFile[];
-        const pricedItems = boqItemsRes.data ?? [];
+        const allItems = boqItemsRes.data ?? [];
 
-        const totalSAR = pricedItems.reduce((sum, i) => sum + ((i.unit_rate ?? 0) * (i.quantity ?? 0)), 0);
+        // Same criteria as exporter: non-descriptive, qty > 0, unit_rate > 0
+        const pricedItems = allItems.filter(
+          (i: { status: string; unit_rate: number | null; quantity: number | null }) =>
+            i.status !== 'descriptive' && (i.quantity ?? 0) > 0 && i.unit_rate != null && i.unit_rate > 0
+        );
+        const totalSAR = pricedItems.reduce(
+          (sum: number, i: { unit_rate: number | null; quantity: number | null }) =>
+            sum + ((i.unit_rate ?? 0) * (i.quantity ?? 0)),
+          0
+        );
 
         setStats({
           totalProjects: projects.length,
