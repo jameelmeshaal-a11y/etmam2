@@ -91,83 +91,187 @@ function triggerDownload(buffer: ArrayBuffer | Buffer, filename: string): void {
   URL.revokeObjectURL(url);
 }
 
-// ─── Column detection using ExcelJS (read-only — never writes back) ───────────
-// Scans the first 20 rows of sheet[0] looking for any cell containing "سعر الوحدة".
-// Returns the column letter (e.g. "G") or null if not found.
+const UP_HEADERS = ['سعر الوحدة', 'سعر الوحده', 'unit price', 'unit_price', 'unitprice'];
+const BOQ_SCORE_HEADERS = [
+  ['وصف البند', 'وصف', 'البيان', 'الوصف', 'description'],
+  ['الكمية', 'كمية', 'qty', 'quantity'],
+  UP_HEADERS,
+];
 
-export async function findUnitPriceColumn(templateBuffer: ArrayBuffer): Promise<string | null> {
+function extractText(v: ExcelJS.CellValue): string {
+  if (!v) return '';
+  if (typeof v === 'string') return v.trim();
+  if (typeof v === 'object' && 'richText' in (v as object))
+    return (v as { richText: { text: string }[] }).richText.map(r => r.text ?? '').join('').trim();
+  return '';
+}
+
+function sheetScore(sheet: ExcelJS.Worksheet): { score: number; colLetter: string | null } {
+  let best = { score: 0, colLetter: null as string | null };
+  for (let r = 1; r <= Math.min(30, sheet.rowCount); r++) {
+    let score = 0;
+    let colLetter: string | null = null;
+    for (let pass = 0; pass < 2; pass++) {
+      sheet.getRow(r + pass).eachCell({ includeEmpty: false }, (cell, col) => {
+        const lower = extractText(cell.value).toLowerCase();
+        if (!lower) return;
+        for (const group of BOQ_SCORE_HEADERS) {
+          if (group.some(h => lower.includes(h.toLowerCase()))) { score++; break; }
+        }
+        if (!colLetter && UP_HEADERS.some(h => lower.includes(h.toLowerCase())))
+          colLetter = sheet.getColumn(col).letter;
+      });
+    }
+    if (score > best.score && colLetter) best = { score, colLetter };
+  }
+  return best;
+}
+
+// ─── Column detection using ExcelJS (read-only — never writes back) ───────────
+// Picks the sheet with the strongest BOQ header match (same logic as the parser),
+// so the column letter and sheet index are consistent with how row_index was stored.
+// Returns { colLetter, sheetXmlPath } or null if the header is not found.
+
+export async function findUnitPriceColumn(
+  templateBuffer: ArrayBuffer
+): Promise<{ colLetter: string; sheetXmlPath: string } | null> {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(templateBuffer);
-  const sheet = workbook.worksheets[0];
-  if (!sheet) return null;
 
-  const HEADERS = ['سعر الوحدة', 'سعر الوحده', 'unit price', 'unit_price', 'unitprice'];
+  // Identify which sheet index has the best BOQ score
+  let bestScore = 0;
+  let bestCol: string | null = null;
+  let bestSheetIndex = -1;
 
-  for (let rowNum = 1; rowNum <= Math.min(20, sheet.rowCount); rowNum++) {
-    const row = sheet.getRow(rowNum);
-    for (let col = 1; col <= sheet.columnCount; col++) {
-      const cell = row.getCell(col);
-      let text = '';
-      const v = cell.value;
-      if (typeof v === 'string') {
-        text = v.trim();
-      } else if (v && typeof v === 'object' && 'richText' in (v as object)) {
-        text = (v as { richText: { text: string }[] }).richText.map(r => r.text ?? '').join('').trim();
-      }
-      if (!text) continue;
-      const lower = text.toLowerCase();
-      if (HEADERS.some(h => lower.includes(h.toLowerCase()))) {
-        return sheet.getColumn(col).letter;
-      }
+  for (let si = 0; si < workbook.worksheets.length; si++) {
+    const { score, colLetter } = sheetScore(workbook.worksheets[si]);
+    if (score > bestScore && colLetter) {
+      bestScore = score;
+      bestCol = colLetter;
+      bestSheetIndex = si;
     }
   }
-  return null;
+
+  if (!bestCol || bestSheetIndex < 0) return null;
+
+  // Map ExcelJS sheet index → ZIP path via workbook.xml.rels
+  // @ts-expect-error — jszip ships no bundled types
+  const zip = await JSZip.loadAsync(templateBuffer);
+  const sheetXmlPath = await resolveSheetZipPath(zip, bestSheetIndex);
+
+  return { colLetter: bestCol, sheetXmlPath };
+}
+
+// Resolve workbook sheet index (0-based) → ZIP-internal path (e.g. "xl/worksheets/sheet2.xml")
+// by reading xl/workbook.xml and xl/_rels/workbook.xml.rels.
+async function resolveSheetZipPath(
+  // @ts-expect-error — jszip ships no bundled types
+  zip: unknown,
+  sheetIndex: number
+): Promise<string> {
+  try {
+    // @ts-expect-error — dynamic JSZip API
+    const relsXml = await zip.file("xl/_rels/workbook.xml.rels").async("string");
+    const relMap: Record<string, string> = {};
+    const relPattern = /<Relationship[^>]+Id="([^"]+)"[^>]+Target="([^"]+)"/g;
+    let m: RegExpExecArray | null;
+    while ((m = relPattern.exec(relsXml)) !== null) relMap[m[1]] = m[2];
+
+    // @ts-expect-error — dynamic JSZip API
+    const wbXml = await zip.file("xl/workbook.xml").async("string");
+    const sheetPattern = /<sheet\b[^>]+r:id="([^"]+)"[^>]*/g;
+    let idx = 0;
+    while ((m = sheetPattern.exec(wbXml)) !== null) {
+      if (idx === sheetIndex) {
+        const target = relMap[m[1]];
+        if (target) return target.startsWith('xl/') ? target : `xl/${target}`;
+      }
+      idx++;
+    }
+  } catch (_) { /* fallback below */ }
+  return "xl/worksheets/sheet1.xml";
 }
 
 // ─── JSZip XML surgery — injects prices without rebuilding the workbook ───────
-// Patches xl/worksheets/sheet1.xml directly and removes calcChain.xml so Excel
-// recalculates formulas cleanly on open. Never touches any other part of the ZIP.
+// Patches the target sheet XML directly. Never rebuilds the workbook.
+// Key correctness rules:
+//   1. Replace the ENTIRE <c .../> or <c ...>...</c> element with a clean numeric
+//      cell — this correctly handles shared-string cells (t="s"), formula cells,
+//      self-closing cells, and any other variant.
+//   2. Do NOT force compression — let JSZip preserve each file's original method
+//      so Excel's ZIP reader sees an identical central directory structure.
+//   3. Remove calcChain.xml and set fullCalcOnLoad in workbook.xml so Excel
+//      recalculates all formula totals the moment the file is opened.
 
 export async function injectPricesIntoXlsx(
   templateBuffer: ArrayBuffer,
   prices: Record<number, number>,
-  unitPriceCol: string
+  unitPriceCol: string,
+  sheetXmlPath = "xl/worksheets/sheet1.xml"
 ): Promise<ArrayBuffer> {
   const zip = await JSZip.loadAsync(templateBuffer);
-  const sheetXml = await zip.file("xl/worksheets/sheet1.xml")!.async("string");
+
+  // @ts-expect-error — dynamic JSZip API
+  const sheetFile = zip.file(sheetXmlPath);
+  if (!sheetFile) throw new Error(`Sheet not found in ZIP: ${sheetXmlPath}`);
+  const sheetXml: string = await sheetFile.async("string");
   let patchedXml = sheetXml;
 
   for (const [rowNum, price] of Object.entries(prices)) {
     const cellRef = `${unitPriceCol}${rowNum}`;
-
-    // Try to update an existing cell element
+    // Match ANY form of the cell: self-closing or with children, any attributes
+    // Replace the entire element with a minimal numeric cell — no t="s", no formula
     const cellPattern = new RegExp(
-      `(<c\\s[^>]*\\br="${cellRef}"[^>]*>)(<[^/].*?<\\/c>|<\\/c>)`,
-      "s"
+      `<c\\b[^>]*\\br="${cellRef}"[^>]*(\\/>|>[\\s\\S]*?<\\/c>)`,
+      "g"
     );
 
     if (cellPattern.test(patchedXml)) {
-      patchedXml = patchedXml.replace(cellPattern, (_, openTag) => {
-        const cleanTag = openTag.replace(/\s*t="s"/, "");
-        return `${cleanTag}<v>${price}</v></c>`;
-      });
+      // Reset lastIndex after .test()
+      patchedXml = patchedXml.replace(
+        new RegExp(`<c\\b[^>]*\\br="${cellRef}"[^>]*(\\/>|>[\\s\\S]*?<\\/c>)`, "g"),
+        `<c r="${cellRef}"><v>${price}</v></c>`
+      );
     } else {
-      // Cell doesn't exist yet — append it inside the row element
+      // Cell doesn't exist in this row — insert it inside the row element
       const rowPattern = new RegExp(
-        `(<row[^>]*\\br="${rowNum}"[^>]*>)(.*?)(<\\/row>)`,
-        "s"
+        `(<row[^>]*\\br="${rowNum}"[^>]*>)([\\s\\S]*?)(<\\/row>)`,
+        "g"
       );
       patchedXml = patchedXml.replace(rowPattern, (_, rowOpen, rowContent, rowClose) => {
-        const newCell = `<c r="${cellRef}"><v>${price}</v></c>`;
-        return `${rowOpen}${rowContent}${newCell}${rowClose}`;
+        return `${rowOpen}${rowContent}<c r="${cellRef}"><v>${price}</v></c>${rowClose}`;
       });
     }
   }
 
-  zip.file("xl/worksheets/sheet1.xml", patchedXml);
+  // @ts-expect-error — dynamic JSZip API
+  zip.file(sheetXmlPath, patchedXml);
+
+  // Remove calcChain so Excel doesn't try to validate stale calculation order
+  // @ts-expect-error — dynamic JSZip API
   zip.remove("xl/calcChain.xml");
 
-  return await zip.generateAsync({ type: "arraybuffer", compression: "DEFLATE" });
+  // Tell Excel to recalculate all formulas on open (so totals reflect injected prices)
+  try {
+    // @ts-expect-error — dynamic JSZip API
+    const wbFile = zip.file("xl/workbook.xml");
+    if (wbFile) {
+      const wbXml: string = await wbFile.async("string");
+      let updatedWb = wbXml;
+      if (/<calcPr\b/.test(updatedWb)) {
+        updatedWb = updatedWb.replace(/<calcPr\b[^>]*\/>/,
+          '<calcPr calcCompleted="0" calcMode="auto" fullCalcOnLoad="1"/>');
+      } else {
+        updatedWb = updatedWb.replace('</workbook>', '<calcPr calcCompleted="0" calcMode="auto" fullCalcOnLoad="1"/></workbook>');
+      }
+      // @ts-expect-error — dynamic JSZip API
+      zip.file("xl/workbook.xml", updatedWb);
+    }
+  } catch (_) { /* non-fatal: file still opens, just needs manual recalc */ }
+
+  // IMPORTANT: do NOT pass compression option — preserves each file's original
+  // compression method (STORE vs DEFLATE), preventing ZIP central-directory corruption
+  return await zip.generateAsync({ type: "arraybuffer" });
 }
 
 // ─── exportBOQ — public API used by BOQTable ─────────────────────────────────
@@ -200,23 +304,23 @@ export async function exportBOQ(boqFile: BOQFile, items: BOQItem[]): Promise<Exp
     };
   }
 
-  // Detect the unit price column letter from the original file
-  const unitPriceCol = await findUnitPriceColumn(buffer);
-  if (!unitPriceCol) {
+  // Detect the unit price column letter and sheet path from the original file
+  const colResult = await findUnitPriceColumn(buffer);
+  if (!colResult) {
     return {
       success: false, injected: 0, total: items.length, variance: 0, unmatched: [],
       error: 'تعذّر تحديد عمود سعر الوحدة في الملف. تحقق من رؤوس الأعمدة.',
     };
   }
 
-  // Build row → price map (row_index is the 1-based Excel row number)
+  // Build row → price map (row_index is the 1-based Excel row number stored during parsing)
   const prices: Record<number, number> = {};
   for (const item of pricedItems) {
     prices[item.row_index] = item.unit_rate!;
   }
 
-  // Inject prices via XML surgery and trigger download
-  const outBuffer = await injectPricesIntoXlsx(buffer, prices, unitPriceCol);
+  // Inject prices via XML surgery on the correct sheet and trigger download
+  const outBuffer = await injectPricesIntoXlsx(buffer, prices, colResult.colLetter, colResult.sheetXmlPath);
   triggerDownload(outBuffer, `${boqFile.name.replace(/\.xlsx?$/i, '')}_priced.xlsx`);
 
   await supabase.from('boq_files').update({ export_variance_pct: 0 }).eq('id', boqFile.id);
