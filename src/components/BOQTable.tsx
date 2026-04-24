@@ -124,7 +124,10 @@ export default function BOQTable({ boqFileId, boqFile, onBack }: BOQTableProps) 
   const unpricedCount = unpricedItems.length;
   const pricedCount = priceableItems.filter(i => i.unit_rate != null && i.unit_rate > 0).length;
   const pricedPct = priceableItems.length > 0 ? Math.round((pricedCount / priceableItems.length) * 100) : 0;
-  const totalSAR = items.reduce((sum, i) => sum + (i.total_price ?? 0), 0);
+  // Sum only priceable items (non-descriptive, qty > 0, unit_rate > 0) to match export totals
+  const totalSAR = items
+    .filter(i => i.status !== 'descriptive' && (i.quantity ?? 0) > 0 && i.unit_rate != null && i.unit_rate > 0)
+    .reduce((sum, i) => sum + (i.total_price ?? 0), 0);
   // pending = has price but confidence < 75, needs review/approval
   const pendingCount = items.filter(i => i.status === 'pending' || i.status === 'stale_price').length;
   // truly needs auto-pricing = pending AND no unit_rate AND qty > 0
