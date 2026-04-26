@@ -80,12 +80,8 @@ export default function BOQSummaryPage({ onNavigate }: BOQSummaryPageProps) {
 
       const fileSummaries: FileSummary[] = files.map(file => {
         const fileItems = items.filter(i => i.boq_file_id === file.id);
-        // "priced" = same criteria as the exporter: non-descriptive, qty > 0, unit_rate > 0
-        // This ensures the UI total always matches the exported Excel total exactly.
         const priced = fileItems.filter(i =>
-          i.status !== 'descriptive'
-          && (i.quantity ?? 0) > 0
-          && i.unit_rate != null && i.unit_rate > 0
+          (i.status === 'approved' || i.override_type === 'manual') && i.unit_rate != null
         );
         const pending = fileItems.filter(i => i.status === 'pending');
         const needsReview = fileItems.filter(i => i.status === 'needs_review');
